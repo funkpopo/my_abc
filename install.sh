@@ -11,6 +11,109 @@ magenta='\e[95m'
 cyan='\e[96m'
 none='\e[0m'
 
+# 获取公共IP的函数
+get_public_ip() {
+    local ip_type=$1  # 4 for IPv4, 6 for IPv6
+    local interface=$2
+    local timeout=3
+
+    # IP检测源列表
+    local ip_apis=(
+        "https://www.cloudflare.com/cdn-cgi/trace"    # Cloudflare
+        "https://api.ipify.org"                       # ipify
+        "https://ip.sb"                               # ip.sb
+        "https://api.ip.sb/ip"                        # ip.sb alternative
+        "https://ifconfig.me"                         # ifconfig.me
+    )
+
+    for api in "${ip_apis[@]}"; do
+        local ip
+        if [[ $api == "https://www.cloudflare.com/cdn-cgi/trace" ]]; then
+            ip=$(curl -"${ip_type}"s --interface "$interface" -m "$timeout" "$api" | grep -oP "ip=\K.*$")
+        else
+            ip=$(curl -"${ip_type}"s --interface "$interface" -m "$timeout" "$api")
+        fi
+
+        if [[ -n "$ip" && $ip =~ ^[0-9a-fA-F:.]+$ ]]; then
+            echo "$ip"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# 获取本机IP
+get_local_ips() {
+    local success=false
+    IPv4=""
+    IPv6=""
+    
+    # 获取网络接口列表
+    InFaces=($(ls /sys/class/net/ | grep -E '^(eth|ens|eno|esp|enp|venet|vif)'))
+    
+    for i in "${InFaces[@]}"; do
+        echo -e "${yellow}正在检测接口 $i ...${none}"
+        
+        # 尝试获取IPv4
+        if [[ -z "$IPv4" ]]; then
+            Public_IPv4=$(get_public_ip 4 "$i")
+            if [[ -n "$Public_IPv4" ]]; then
+                IPv4="$Public_IPv4"
+                echo -e "${green}在接口 $i 上成功获取到IPv4: $IPv4${none}"
+                success=true
+            fi
+        fi
+        
+        # 尝试获取IPv6
+        if [[ -z "$IPv6" ]]; then
+            Public_IPv6=$(get_public_ip 6 "$i")
+            if [[ -n "$Public_IPv6" ]]; then
+                IPv6="$Public_IPv6"
+                echo -e "${green}在接口 $i 上成功获取到IPv6: $IPv6${none}"
+                success=true
+            fi
+        fi
+        
+        # 如果两种IP都已获取到，可以提前退出循环
+        if [[ -n "$IPv4" && -n "$IPv6" ]]; then
+            break
+        fi
+    done
+
+    # 如果通过网络接口获取失败，尝试直接获取
+    if [[ -z "$IPv4" ]]; then
+        echo -e "${yellow}尝试直接获取IPv4...${none}"
+        IPv4=$(get_public_ip 4)
+        if [[ -n "$IPv4" ]]; then
+            echo -e "${green}成功获取到IPv4: $IPv4${none}"
+            success=true
+        fi
+    fi
+    
+    if [[ -z "$IPv6" ]]; then
+        echo -e "${yellow}尝试直接获取IPv6...${none}"
+        IPv6=$(get_public_ip 6)
+        if [[ -n "$IPv6" ]]; then
+            echo -e "${green}成功获取到IPv6: $IPv6${none}"
+            success=true
+        fi
+    fi
+
+    # 检查是否获取到任何IP
+    if ! $success; then
+        echo -e "${red}警告: 未能获取到任何公共IP地址${none}"
+        echo -e "${yellow}请检查:${none}"
+        echo "1. 网络连接是否正常"
+        echo "2. 是否有防火墙限制"
+        echo "3. 服务器是否支持公网IP"
+        echo "4. DNS设置是否正确"
+        return 1
+    fi
+
+    return 0
+}
+
 error() {
     echo -e "\n$red 输入错误! $none\n"
 }
@@ -112,20 +215,16 @@ install_xray() {
     echo -e "本脚本支持带参数执行, 省略交互过程, 详见GitHub."
     echo "----------------------------------------------------------------"
 
-    # 本机 IP
-    InFaces=($(ls /sys/class/net/ | grep -E '^(eth|ens|eno|esp|enp|venet|vif)'))
-
-    for i in "${InFaces[@]}"; do
-        Public_IPv4=$(curl -4s --interface "$i" -m 2 https://www.cloudflare.com/cdn-cgi/trace | grep -oP "ip=\K.*$")
-        Public_IPv6=$(curl -6s --interface "$i" -m 2 https://www.cloudflare.com/cdn-cgi/trace | grep -oP "ip=\K.*$")
-
-        if [[ -n "$Public_IPv4" ]]; then
-            IPv4="$Public_IPv4"
+    # 获取本机IP
+    echo -e "$yellow获取本机IP地址...${none}"
+    if ! get_local_ips; then
+        echo -e "${red}获取IP地址失败!${none}"
+        echo -e "是否继续安装?[y/N]"
+        read -r continue_install
+        if [[ ! $continue_install =~ ^[Yy]$ ]]; then
+            return 1
         fi
-        if [[ -n "$Public_IPv6" ]]; then
-            IPv6="$Public_IPv6"
-        fi
-    done
+    fi
 
     # 生成UUID
     uuidSeed=${IPv4}${IPv6}$(cat /proc/sys/kernel/hostname)$(cat /etc/timezone)
@@ -134,25 +233,25 @@ install_xray() {
     # 执行脚本带参数
     if [ $# -ge 1 ]; then
         case ${1} in
-        4)
-            netstack=4
-            ip=${IPv4}
-            ;;
-        6)
-            netstack=6
-            ip=${IPv6}
-            ;;
-        *)
-            if [[ -n "$IPv4" ]]; then
+            4)
                 netstack=4
                 ip=${IPv4}
-            elif [[ -n "$IPv6" ]]; then
+                ;;
+            6)
                 netstack=6
                 ip=${IPv6}
-            else
-                warn "没有获取到公共IP"
-            fi
-            ;;
+                ;;
+            *)
+                if [[ -n "$IPv4" ]]; then
+                    netstack=4
+                    ip=${IPv4}
+                elif [[ -n "$IPv6" ]]; then
+                    netstack=6
+                    ip=${IPv6}
+                else
+                    warn "没有获取到公共IP"
+                fi
+                ;;
         esac
 
         port=${2:-443}
