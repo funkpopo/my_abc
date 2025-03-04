@@ -576,7 +576,20 @@ list_port_configurations() {
     echo -e "$yellow 当前所有端口配置 $none"
     echo "----------------------------------------------------------------"
     
-    if [[ ! -s "$PORT_INFO_FILE" ]] || [[ $(jq '.ports | length' "$PORT_INFO_FILE") -eq 0 ]]; then
+    if [[ ! -f "$PORT_INFO_FILE" ]]; then
+        echo -e "$red 配置文件不存在，请先添加端口配置 $none"
+        return
+    fi
+    
+    # 检查配置文件是否为空或格式错误
+    if ! jq . "$PORT_INFO_FILE" &>/dev/null; then
+        echo -e "$red 配置文件格式错误 $none"
+        return
+    fi
+    
+    # 检查是否有端口配置
+    local port_count=$(jq '.ports | length' "$PORT_INFO_FILE" 2>/dev/null || echo 0)
+    if [[ $port_count -eq 0 ]]; then
         echo -e "$red 目前没有配置任何端口，请先添加端口配置 $none"
         return
     fi
@@ -585,26 +598,43 @@ list_port_configurations() {
     echo "----------------------------------------------------------------"
     
     local index=1
-    jq -c '.ports[]' "$PORT_INFO_FILE" | while read -r port_info; do
-        local port=$(echo "$port_info" | jq -r '.port')
-        local uuid=$(echo "$port_info" | jq -r '.uuid')
-        # 截取UUID的开头和结尾部分，中间用省略号
-        local uuid_short="${uuid:0:8}...${uuid:24}"
-        local domain=$(echo "$port_info" | jq -r '.domain')
-        local socks5_enabled=$(echo "$port_info" | jq -r '.socks5.enabled // false')
+    jq -c '.ports[]' "$PORT_INFO_FILE" 2>/dev/null | while read -r port_info; do
+        if [[ -z "$port_info" ]]; then
+            continue
+        fi
         
-        if [[ "$socks5_enabled" == "true" ]]; then
-            local socks5_address=$(echo "$port_info" | jq -r '.socks5.address')
-            local socks5_port=$(echo "$port_info" | jq -r '.socks5.port')
-            socks5_status="${green}启用 (${socks5_address}:${socks5_port})${none}"
+        local port=$(echo "$port_info" | jq -r '.port' 2>/dev/null)
+        local uuid=$(echo "$port_info" | jq -r '.uuid' 2>/dev/null)
+        # 截取UUID的开头和结尾部分，中间用省略号
+        local uuid_short=""
+        if [[ -n "$uuid" && ${#uuid} -gt 12 ]]; then
+            uuid_short="${uuid:0:8}...${uuid:24}"
         else
-            socks5_status="${red}禁用${none}"
+            uuid_short="$uuid"
+        fi
+        
+        local domain=$(echo "$port_info" | jq -r '.domain' 2>/dev/null)
+        local socks5_enabled=$(echo "$port_info" | jq -r '.socks5.enabled // false' 2>/dev/null)
+        
+        local socks5_status="${red}禁用${none}"
+        if [[ "$socks5_enabled" == "true" ]]; then
+            local socks5_address=$(echo "$port_info" | jq -r '.socks5.address' 2>/dev/null)
+            local socks5_port=$(echo "$port_info" | jq -r '.socks5.port' 2>/dev/null)
+            socks5_status="${green}启用 (${socks5_address}:${socks5_port})${none}"
         fi
         
         echo -e "${green}$index${none}    ${cyan}$port${none}    ${yellow}$uuid_short${none}    ${magenta}$domain${none}    ${socks5_status}"
         index=$((index+1))
     done
     
+    echo "----------------------------------------------------------------"
+    
+    # 调试信息
+    echo -e "${yellow}调试信息:${none}"
+    echo -e "配置文件路径: $PORT_INFO_FILE"
+    echo -e "端口数量: $port_count"
+    echo -e "配置文件内容:"
+    jq . "$PORT_INFO_FILE"
     echo "----------------------------------------------------------------"
 }
 
