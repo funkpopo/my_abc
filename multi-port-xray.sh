@@ -741,16 +741,15 @@ add_port_configuration() {
     
     # 端口选择
     while :; do
-        read -p "$(echo -e "请输入端口 [${magenta}1-65535${none}]，建议使用大于1024的端口: ")" port
-        if [[ -z "$port" ]]; then
-            error
-            continue
-        fi
-        
-        if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
-            error
-            continue
-        fi
+    read -p "$(echo -e "请输入端口 [${magenta}1-65535${none}]，建议使用大于1024的端口（默认: ${cyan}7999${none}）: ")" port
+    if [[ -z "$port" ]]; then
+        port=7999
+    fi
+    
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
+        error
+        continue
+    fi
         
         # 检查端口是否已被使用
         if check_port_exists "$port"; then
@@ -979,10 +978,12 @@ generate_connection_info() {
     # 生成二维码
     echo "二维码:"
     qrencode -t UTF8 "$vless_reality_url"
+    qrencode -t ANSI "$vless_reality_url"
     
     # 保存信息到文件
     echo "$vless_reality_url" > "$HOME/vless_reality_${port}.txt"
     qrencode -t UTF8 "$vless_reality_url" >> "$HOME/vless_reality_${port}.txt"
+    qrencode -t ANSI "$vless_reality_url" >> "$HOME/vless_reality_${port}.txt"
     
     echo
     echo "链接信息已保存到 $HOME/vless_reality_${port}.txt"
