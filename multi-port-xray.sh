@@ -707,6 +707,19 @@ add_port_configuration() {
     echo -e "$yellow 添加新端口配置 $none"
     echo "----------------------------------------------------------------"
     
+     # 检查是否安装了Xray
+    if ! command -v xray &> /dev/null; then
+        echo -e "${red}未检测到Xray安装，无法添加端口配置${none}"
+        echo -e "是否现在安装Xray? [y/N]"
+        read -r install_xray_now
+        if [[ $install_xray_now =~ ^[Yy]$ ]]; then
+            install_xray
+        else
+            echo -e "${yellow}已取消添加端口配置，请先安装Xray${none}"
+            return
+        fi
+    fi
+    
     # 获取本机IP
     if ! get_local_ips; then
         echo -e "${red}获取IP地址失败!${none}"
