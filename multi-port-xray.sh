@@ -292,7 +292,6 @@ save_port_info() {
     local public_key=$4
     local shortid=$5
     local domain=$6
-    local port_id="port_${port}"
     
     # 检查端口是否已存在，如果存在则更新配置
     if jq -e ".ports[] | select(.port == $port)" "$PORT_INFO_FILE" > /dev/null; then
@@ -304,7 +303,7 @@ save_port_info() {
             \"public_key\": \"$public_key\",
             \"shortid\": \"$shortid\",
             \"domain\": \"$domain\",
-            \"socks5\": .socks5 // null
+            \"socks5\": (.socks5 // null)
         }" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
     else
         # 添加新的端口配置
