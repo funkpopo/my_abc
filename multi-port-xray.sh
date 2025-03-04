@@ -1334,7 +1334,7 @@ modify_port_socks5() {
                 [ -n "$temp_user" ] && new_socks5_user=$temp_user
                 
                 echo -e "请输入密码"
-                read -s -p "$(echo -e "(留空保持不变): ")" temp_pass
+                read -p "$(echo -e "(留空保持不变): ")" temp_pass
                 echo  # 为了换行
                 [ -n "$temp_pass" ] && new_socks5_pass=$temp_pass
             fi
