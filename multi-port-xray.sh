@@ -1118,10 +1118,24 @@ modify_port_uuid() {
         fi
         
         # 生成新的密钥
-        private_key=$(echo -n ${new_uuid} | md5sum | head -c 32 | base64 -w 0 | tr '+/' '-_' | tr -d '=')
-        tmp_key=$(echo -n ${private_key} | xargs xray x25519 -i)
-        private_key=$(echo ${tmp_key} | awk '{print $3}')
-        public_key=$(echo ${tmp_key} | awk '{print $6}')
+        local seed=$(echo -n ${new_uuid} | md5sum | head -c 32 | base64 -w 0 | tr '+/' '-_' | tr -d '=')
+        local tmp_key=$(echo -n ${seed} | xargs xray x25519 -i)
+        local new_private_key=$(echo ${tmp_key} | awk '{print $3}')
+        local new_public_key=$(echo ${tmp_key} | awk '{print $6}')
+
+        # 获取旧密钥对
+        local old_private_key=$(echo "$port_info" | jq -r '.private_key')
+        local old_public_key=$(echo "$port_info" | jq -r '.public_key')
+
+        echo
+        echo -e "$yellow 旧UUID = ${cyan}$old_uuid${none}"
+        echo -e "$yellow 旧私钥 = ${cyan}$old_private_key${none}"
+        echo -e "$yellow 旧公钥 = ${cyan}$old_public_key${none}"
+        echo
+        echo -e "$yellow 新UUID = ${cyan}$new_uuid${none}"
+        echo -e "$yellow 新私钥 = ${cyan}$new_private_key${none}"
+        echo -e "$yellow 新公钥 = ${cyan}$new_public_key${none}"
+        echo
         
         # 生成新的ShortID
         local new_shortid=$(echo -n ${new_uuid} | sha1sum | head -c 16)
@@ -1135,7 +1149,7 @@ modify_port_uuid() {
         
         # 保存修改
         local domain=$(echo "$port_info" | jq -r '.domain')
-        save_port_info "$port" "$new_uuid" "$private_key" "$public_key" "$new_shortid" "$domain"
+        save_port_info "$port" "$new_uuid" "$new_private_key" "$new_public_key" "$new_shortid" "$domain"
         
         # 保持SOCKS5配置不变
         local socks5_config=$(echo "$port_info" | jq -r '.socks5')
@@ -1691,7 +1705,7 @@ show_menu() {
     echo -e "  ${green}11.${none} 卸载 Xray"
     echo -e "  ${green}0.${none} 退出"
     echo "------------------------------------"
-    read -p "请选择 [0-13]: " choice
+    read -p "请选择 [0-11]: " choice
 
     case $choice in
         1)
