@@ -707,6 +707,19 @@ add_port_configuration() {
     echo -e "$yellow 添加新端口配置 $none"
     echo "----------------------------------------------------------------"
     
+     # 检查是否安装了Xray
+    if ! command -v xray &> /dev/null; then
+        echo -e "${red}未检测到Xray安装，无法添加端口配置${none}"
+        echo -e "是否现在安装Xray? [y/N]"
+        read -r install_xray_now
+        if [[ $install_xray_now =~ ^[Yy]$ ]]; then
+            install_xray
+        else
+            echo -e "${yellow}已取消添加端口配置，请先安装Xray${none}"
+            return
+        fi
+    fi
+
     # 获取本机IP
     if ! get_local_ips; then
         echo -e "${red}获取IP地址失败!${none}"
@@ -1442,6 +1455,7 @@ delete_port_configuration() {
     
     pause
 }
+
 # 卸载 Xray 的函数
 uninstall_xray() {
     echo
@@ -1475,9 +1489,15 @@ uninstall_xray() {
         echo -e "$green 端口配置信息已删除 $none"
     fi
     
-    # 删除连接信息文件
-    rm -f "$HOME/_vless_reality_url_"*
+    # 删除连接信息文件(vless_reality开头的txt文件)
+    rm -f "$HOME/vless_reality_"*.txt 2>/dev/null
     echo -e "$green 连接信息文件已删除 $none"
+    
+    # 删除日志文件
+    if [ -f "$LOG_FILE" ]; then
+        rm -f "$LOG_FILE"
+        echo -e "$green 日志文件已删除 $none"
+    fi
     
     echo
     echo -e "$green Xray 已完全卸载! $none"
@@ -1493,6 +1513,7 @@ uninstall_xray() {
         show_menu
     fi
 }
+
 # 显示所有端口的连接信息
 show_all_connections() {
     echo
