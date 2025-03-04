@@ -906,7 +906,7 @@ configure_socks5_for_port() {
     socks5_pass=""
     if [[ $auth_needed = "y" ]]; then
         read -p "$(echo -e "请输入用户名: ")" socks5_user
-        read -p -s "$(echo -e "请输入密码: ")" socks5_pass
+        read -s -p "$(echo -e "请输入密码: ")" socks5_pass
         echo  # 为了换行
     fi
     
