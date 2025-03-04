@@ -772,7 +772,7 @@ add_port_configuration() {
     done
     
     # 生成UUID
-    uuidSeed=${ip}$(cat /proc/sys/kernel/hostname)$(cat /etc/timezone)
+    uuidSeed=${ip}$(cat /proc/sys/kernel/hostname)$(cat /etc/timezone)${port}$(date +%s%N)
     default_uuid=$(curl -sL https://www.uuidtools.com/api/generate/v3/namespace/ns:dns/name/${uuidSeed} | grep -oP '[^-]{8}-[^-]{4}-[^-]{4}-[^-]{4}-[^-]{12}')
     
     while :; do
@@ -1518,71 +1518,7 @@ show_all_connections() {
     pause
 }
 
-# 查看流量统计
-show_traffic_stats() {
-    echo
-    echo -e "$yellow 流量统计 $none"
-    echo "----------------------------------------------------------------"
-    
-    # 检查 Xray 服务是否运行
-    if ! systemctl is-active --quiet xray; then
-        echo -e "${red}Xray 服务未运行${none}"
-        return
-    fi
-    
-    # 获取所有端口
-    if [[ ! -s "$PORT_INFO_FILE" ]] || [[ $(jq '.ports | length' "$PORT_INFO_FILE") -eq 0 ]]; then
-        echo -e "$red 目前没有配置任何端口，请先添加端口配置 $none"
-        return
-    fi
-    
-    echo -e "${cyan}端口    上行流量    下行流量    总流量${none}"
-    echo "----------------------------------------------------------------"
-    
-    # 总流量统计
-    local total_up=0
-    local total_down=0
-    
-    # 通过 API 获取流量统计
-    # 注意：此功能需要配置 Xray API，这里仅作为示例
-    # 实际实现可能需要修改 Xray 配置以启用 API
-    
-    jq -c '.ports[]' "$PORT_INFO_FILE" | while read -r port_info; do
-        local port=$(echo "$port_info" | jq -r '.port')
-        
-        # 模拟获取流量数据 (实际项目中应替换为真实的API调用)
-        # 这里只是一个示例，真实实现应该通过 Xray API 或日志分析获取
-        # 由于没有实际配置 Xray API，这里使用随机数据代替
-        local up_traffic=$((RANDOM * 1024 * 1024))  # 随机上行流量
-        local down_traffic=$((RANDOM * 1024 * 1024))  # 随机下行流量
-        local total=$((up_traffic + down_traffic))
-        
-        # 格式化流量单位
-        local up_formatted=$(format_bytes $up_traffic)
-        local down_formatted=$(format_bytes $down_traffic)
-        local total_formatted=$(format_bytes $total)
-        
-        echo -e "${cyan}$port${none}    ${green}$up_formatted${none}    ${yellow}$down_formatted${none}    ${magenta}$total_formatted${none}"
-        
-        # 累计总流量
-        total_up=$((total_up + up_traffic))
-        total_down=$((total_down + down_traffic))
-    done
-    
-    local total_all=$((total_up + total_down))
-    local total_up_formatted=$(format_bytes $total_up)
-    local total_down_formatted=$(format_bytes $total_down)
-    local total_all_formatted=$(format_bytes $total_all)
-    
-    echo "----------------------------------------------------------------"
-    echo -e "${cyan}总计${none}    ${green}$total_up_formatted${none}    ${yellow}$total_down_formatted${none}    ${magenta}$total_all_formatted${none}"
-    
-    echo
-    echo -e "${yellow}注意: 此功能需要配置 Xray API，当前仅显示示例数据。${none}"
-    echo -e "${yellow}要获取真实流量统计，请参考 Xray 文档配置 API。${none}"
-    
-    pause
-}
+
 
 # 格式化字节大小
 format_bytes() {
@@ -1599,146 +1535,8 @@ format_bytes() {
     echo "$value ${suffix[$i]}"
 }
 
-# 安装设置定时更新任务
-setup_auto_update() {
-    echo
-    echo -e "$yellow 设置定时更新 $none"
-    echo "----------------------------------------------------------------"
-    
-    echo -e "请选择更新频率:"
-    echo -e "  ${green}1.${none} 每天"
-    echo -e "  ${green}2.${none} 每周"
-    echo -e "  ${green}3.${none} 每月"
-    echo -e "  ${green}4.${none} 取消定时更新"
-    echo -e "  ${green}0.${none} 返回"
-    
-    read -p "$(echo -e "请选择 [${green}0-4${none}]: ")" update_choice
-    
-    case $update_choice in
-        1)
-            # 每天凌晨3点更新
-            (crontab -l 2>/dev/null | grep -v "xray-update-geodata.sh"; echo "0 3 * * * bash $HOME/xray-update-geodata.sh") | crontab -
-            
-            # 创建更新脚本
-            cat > "$HOME/xray-update-geodata.sh" << 'EOF'
-#!/bin/bash
-# 更新 Xray GeoIP 和 GeoSite 数据
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata
-systemctl restart xray
-EOF
-            chmod +x "$HOME/xray-update-geodata.sh"
-            
-            success "已设置每天凌晨3点自动更新"
-            log_info "设置每天自动更新"
-            ;;
-            
-        2)
-            # 每周日凌晨3点更新
-            (crontab -l 2>/dev/null | grep -v "xray-update-geodata.sh"; echo "0 3 * * 0 bash $HOME/xray-update-geodata.sh") | crontab -
-            
-            # 创建更新脚本
-            cat > "$HOME/xray-update-geodata.sh" << 'EOF'
-#!/bin/bash
-# 更新 Xray GeoIP 和 GeoSite 数据
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata
-systemctl restart xray
-EOF
-            chmod +x "$HOME/xray-update-geodata.sh"
-            
-            success "已设置每周日凌晨3点自动更新"
-            log_info "设置每周自动更新"
-            ;;
-            
-        3)
-            # 每月1日凌晨3点更新
-            (crontab -l 2>/dev/null | grep -v "xray-update-geodata.sh"; echo "0 3 1 * * bash $HOME/xray-update-geodata.sh") | crontab -
-            
-            # 创建更新脚本
-            cat > "$HOME/xray-update-geodata.sh" << 'EOF'
-#!/bin/bash
-# 更新 Xray GeoIP 和 GeoSite 数据
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata
-systemctl restart xray
-EOF
-            chmod +x "$HOME/xray-update-geodata.sh"
-            
-            success "已设置每月1日凌晨3点自动更新"
-            log_info "设置每月自动更新"
-            ;;
-            
-        4)
-            # 取消定时更新
-            crontab -l 2>/dev/null | grep -v "xray-update-geodata.sh" | crontab -
-            [ -f "$HOME/xray-update-geodata.sh" ] && rm -f "$HOME/xray-update-geodata.sh"
-            
-            success "已取消定时更新"
-            log_info "取消定时更新"
-            ;;
-            
-        0)
-            return
-            ;;
-            
-        *)
-            error
-            ;;
-    esac
-    
-    pause
-}
 
-# 检查脚本更新
-check_script_update() {
-    echo
-    echo -e "$yellow 检查脚本更新 $none"
-    echo "----------------------------------------------------------------"
-    
-    # 从GitHub获取最新版本
-    local latest_version=$(curl -s https://api.github.com/repos/your-username/xray-multi-port/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    
-    if [[ -z "$latest_version" ]]; then
-        echo -e "${red}无法获取最新版本信息${none}"
-        return
-    fi
-    
-    echo -e "当前版本: ${cyan}$VERSION${none}"
-    echo -e "最新版本: ${cyan}$latest_version${none}"
-    
-    # 比较版本
-    if [[ "$VERSION" != "$latest_version" ]]; then
-        echo -e "${yellow}有新版本可用${none}"
-        echo -e "是否更新到最新版本?"
-        read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" update_script
-        
-        if [[ "$update_script" == "y" ]]; then
-            echo -e "${green}正在更新脚本...${none}"
-            
-            # 下载最新版本
-            curl -L -o /tmp/xray-multi-port.sh https://github.com/your-username/xray-multi-port/releases/download/$latest_version/xray-multi-port.sh
-            
-            # 检查下载是否成功
-            if [[ $? -eq 0 ]]; then
-                # 备份当前脚本
-                cp "$0" "${0}.bak.$(date +%Y%m%d%H%M%S)"
-                
-                # 替换脚本
-                mv /tmp/xray-multi-port.sh "$0"
-                chmod +x "$0"
-                
-                success "脚本更新成功，请重新运行"
-                log_info "脚本更新成功: $VERSION -> $latest_version"
-                exit 0
-            else
-                echo -e "${red}更新失败${none}"
-                log_error "脚本更新失败"
-            fi
-        fi
-    else
-        echo -e "${green}已是最新版本${none}"
-    fi
-    
-    pause
-}
+
 
 # 显示使用帮助信息
 show_help() {
@@ -1887,13 +1685,10 @@ show_menu() {
     echo -e "  ${green}5.${none} 删除端口配置"
     echo -e "  ${green}6.${none} 显示所有端口连接信息"
     echo -e "  ${green}7.${none} 更新 GeoIP 和 GeoSite 数据"
-    echo -e "  ${green}8.${none} 流量统计"
-    echo -e "  ${green}9.${none} 设置定时更新"
-    echo -e "  ${green}10.${none} 备份与恢复"
-    echo -e "  ${green}11.${none} 检查脚本更新"
-    echo -e "  ${green}12.${none} 查看 Xray 日志"
-    echo -e "  ${green}13.${none} 帮助信息"
-    echo -e "  ${green}14.${none} 卸载 Xray"
+    echo -e "  ${green}8.${none} 备份与恢复"
+    echo -e "  ${green}9.${none} 查看 Xray 日志"
+    echo -e "  ${green}10.${none} 帮助信息"
+    echo -e "  ${green}11.${none} 卸载 Xray"
     echo -e "  ${green}0.${none} 退出"
     echo "------------------------------------"
     read -p "请选择 [0-13]: " choice
@@ -1922,12 +1717,6 @@ show_menu() {
             update_geodata
             ;;
         8)
-            show_traffic_stats
-            ;;
-        9)
-            setup_auto_update
-            ;;
-        10)
             echo
             echo -e "  ${green}1.${none} 备份配置"
             echo -e "  ${green}2.${none} 恢复配置"
@@ -1944,16 +1733,13 @@ show_menu() {
                     ;;
             esac
             ;;
-        11)
-            check_script_update
-            ;;
-        12)
+        9)
             view_xray_logs
             ;;
-        13)
+        10)
             show_help
             ;;
-        14)
+        11)
             uninstall_xray
             ;;
         0)
