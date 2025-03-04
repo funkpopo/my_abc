@@ -3,24 +3,121 @@
 # 等待1秒, 避免curl下载脚本的打印与脚本本身的显示冲突
 sleep 1
 
-echo -e "                     _ ___                   \n ___ ___ __ __ ___ _| |  _|___ __ __   _ ___ \n|-_ |_  |  |  |-_ | _ |   |- _|  |  |_| |_  |\n|___|___|  _  |___|___|_|_|___|  _  |___|___|\n        |_____|               |_____|        "
+# 版本信息
+VERSION="2.0"
+
+echo -e "                     _ ___                   \n ___ ___ __ __ ___ _| |  _|___ __ __   _ ___ \n|-_ |_  |  |  |-_ | _ |   |- _|  |  |_| |_  |\n|___|___|  _  |___|___|_|_|___|  _  |___|___|\n        |_____|               |_____|        \nv${VERSION}"
 red='\e[91m'
 green='\e[92m'
 yellow='\e[93m'
 magenta='\e[95m'
 cyan='\e[96m'
+blue='\e[94m'
 none='\e[0m'
 
-# 配置文件路径
-CONFIG_FILE="/usr/local/etc/xray/config.json"
-PORT_INFO_FILE="$HOME/.xray_port_info"
+# 初始化变量
+XRAY_VERSION=""
+XRAY_RUNNING=false
+ROOT_REQUIRED=true
+IPV4=""
+IPV6=""
+OS_INFO=""
 
-# 获取公共IP的函数
+# 配置文件路径
+CONFIG_DIR="/usr/local/etc/xray"
+CONFIG_FILE="${CONFIG_DIR}/config.json"
+BACKUP_DIR="${CONFIG_DIR}/backups"
+PORT_INFO_FILE="$HOME/.xray_port_info"
+LOG_FILE="/var/log/xray/access.log"
+ERROR_LOG_FILE="/var/log/xray/error.log"
+
+# 建立备份目录
+mkdir -p ${BACKUP_DIR} &>/dev/null
+
+# 检查是否为root用户
+check_root() {
+    if [[ $ROOT_REQUIRED && $EUID -ne 0 ]]; then
+        echo -e "${red}错误: 此脚本必须以root用户身份运行${none}"
+        echo -e "请使用 ${cyan}sudo -i${none} 切换到root用户后再运行"
+        exit 1
+    fi
+}
+
+# 检查操作系统
+check_os() {
+    if [[ -f /etc/debian_version ]]; then
+        OS_INFO="Debian $(cat /etc/debian_version)"
+        if grep -q "bookworm" /etc/debian_version; then
+            OS_INFO="${OS_INFO} (Debian 12)"
+        elif grep -q "bullseye" /etc/debian_version; then
+            OS_INFO="${OS_INFO} (Debian 11)"
+        elif grep -q "buster" /etc/debian_version; then
+            OS_INFO="${OS_INFO} (Debian 10)"
+        fi
+    elif [[ -f /etc/lsb-release ]]; then
+        OS_INFO=$(grep -E "DISTRIB_DESCRIPTION" /etc/lsb-release | cut -d= -f2 | tr -d '"')
+    elif [[ -f /etc/redhat-release ]]; then
+        OS_INFO=$(cat /etc/redhat-release)
+    else
+        OS_INFO="未知操作系统"
+    fi
+    
+    echo -e "${yellow}当前系统: ${OS_INFO}${none}"
+    if [[ "$OS_INFO" == "未知操作系统" ]]; then
+        echo -e "${yellow}警告: 系统类型未识别，脚本可能无法正常工作${none}"
+        echo "脚本设计用于Debian/Ubuntu系统，其他系统可能有兼容性问题"
+        echo -e "继续运行? (y/n): "
+        read -r confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+}
+
+# 检查Xray运行状态
+check_xray_status() {
+    if command -v xray >/dev/null 2>&1; then
+        XRAY_VERSION=$(xray --version | head -n1 | cut -d' ' -f2)
+        echo -e "${green}检测到Xray版本: ${XRAY_VERSION}${none}"
+        
+        if systemctl is-active --quiet xray; then
+            XRAY_RUNNING=true
+            echo -e "${green}Xray服务运行状态: 正在运行${none}"
+        else
+            XRAY_RUNNING=false
+            echo -e "${yellow}Xray服务运行状态: 未运行${none}"
+        fi
+    else
+        XRAY_VERSION=""
+        XRAY_RUNNING=false
+        echo -e "${yellow}未检测到Xray，将进行安装${none}"
+    fi
+}
+
+# 创建随机UUID
+generate_uuid() {
+    # 优先使用uuidgen，如果不可用则使用curl访问在线API
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuidgen
+    elif [[ -n "$1" ]]; then
+        # 使用传入的种子生成确定性UUID
+        curl -s "https://www.uuidtools.com/api/generate/v3/namespace/ns:dns/name/$1" | grep -oP '[^-]{8}-[^-]{4}-[^-]{4}-[^-]{4}-[^-]{12}'
+    else
+        # 随机UUID
+        curl -s "https://www.uuidtools.com/api/generate/v4" | grep -oP '[^-]{8}-[^-]{4}-[^-]{4}-[^-]{4}-[^-]{12}'
+    fi
+}
+
+# 获取公共IP的函数，增加了超时检测和更多错误处理
 get_public_ip() {
     local ip_type=$1  # 4 for IPv4, 6 for IPv6
     local interface=$2
-    local timeout=3
-
+    local timeout=5
+    local success=false
+    local ip=""
+    local attempt=1
+    local max_attempts=3
+    
     # IP检测源列表
     local ip_apis=(
         "https://www.cloudflare.com/cdn-cgi/trace"    # Cloudflare
@@ -28,80 +125,108 @@ get_public_ip() {
         "https://ip.sb"                               # ip.sb
         "https://api.ip.sb/ip"                        # ip.sb alternative
         "https://ifconfig.me"                         # ifconfig.me
+        "https://ipinfo.io/ip"                        # ipinfo.io
     )
 
-    for api in "${ip_apis[@]}"; do
-        local ip
-        if [[ $api == "https://www.cloudflare.com/cdn-cgi/trace" ]]; then
-            ip=$(curl -"${ip_type}"s --interface "$interface" -m "$timeout" "$api" | grep -oP "ip=\K.*$")
-        else
-            ip=$(curl -"${ip_type}"s --interface "$interface" -m "$timeout" "$api")
-        fi
+    echo -e "${yellow}尝试获取IPv${ip_type}地址...${none}"
 
-        if [[ -n "$ip" && $ip =~ ^[0-9a-fA-F:.]+$ ]]; then
-            echo "$ip"
-            return 0
+    while [[ $attempt -le $max_attempts && $success == false ]]; do
+        for api in "${ip_apis[@]}"; do
+            echo -e "${cyan}尝试使用 $api (尝试 $attempt/$max_attempts)${none}"
+            
+            if [[ -n "$interface" ]]; then
+                curl_command="curl -${ip_type}s --interface $interface -m $timeout"
+            else
+                curl_command="curl -${ip_type}s -m $timeout"
+            fi
+            
+            if [[ $api == "https://www.cloudflare.com/cdn-cgi/trace" ]]; then
+                ip=$(eval "$curl_command $api" 2>/dev/null | grep -oP "ip=\K.*$")
+            else
+                ip=$(eval "$curl_command $api" 2>/dev/null)
+            fi
+
+            if [[ -n "$ip" && $ip =~ ^[0-9a-fA-F:.]+$ ]]; then
+                success=true
+                echo -e "${green}成功获取到IPv${ip_type}: $ip${none}"
+                break
+            fi
+        done
+        
+        if [[ $success == false ]]; then
+            echo -e "${yellow}尝试 $attempt 失败，将再尝试...${none}"
+            sleep 2
+            attempt=$((attempt+1))
         fi
     done
 
-    return 1
+    if [[ $success == true ]]; then
+        echo "$ip"
+        return 0
+    else
+        echo ""
+        return 1
+    fi
 }
 
-# 获取本机IP
+# 获取本机IP，改进了错误处理和日志输出
 get_local_ips() {
     local success=false
-    IPv4=""
-    IPv6=""
+    IPV4=""
+    IPV6=""
     
-    # 获取网络接口列表
-    InFaces=($(ls /sys/class/net/ | grep -E '^(eth|ens|eno|esp|enp|venet|vif)'))
+    echo -e "${yellow}正在检测本机IP地址...${none}"
     
-    for i in "${InFaces[@]}"; do
-        echo -e "${yellow}正在检测接口 $i ...${none}"
+    # 尝试直接获取IPv4
+    echo -e "${yellow}尝试直接获取IPv4...${none}"
+    IPV4=$(get_public_ip 4)
+    if [[ -n "$IPV4" ]]; then
+        echo -e "${green}成功获取到IPv4: $IPV4${none}"
+        success=true
+    else
+        # 获取网络接口列表
+        echo -e "${yellow}直接获取IPv4失败，尝试通过网络接口获取...${none}"
+        InFaces=($(ls /sys/class/net/ | grep -E '^(eth|ens|eno|esp|enp|venet|vif)'))
         
-        # 尝试获取IPv4
-        if [[ -z "$IPv4" ]]; then
+        for i in "${InFaces[@]}"; do
+            echo -e "${yellow}正在检测接口 $i ...${none}"
+            
+            # 尝试获取IPv4
             Public_IPv4=$(get_public_ip 4 "$i")
             if [[ -n "$Public_IPv4" ]]; then
-                IPv4="$Public_IPv4"
-                echo -e "${green}在接口 $i 上成功获取到IPv4: $IPv4${none}"
+                IPV4="$Public_IPv4"
+                echo -e "${green}在接口 $i 上成功获取到IPv4: $IPV4${none}"
                 success=true
+                break
             fi
-        fi
-        
-        # 尝试获取IPv6
-        if [[ -z "$IPv6" ]]; then
-            Public_IPv6=$(get_public_ip 6 "$i")
-            if [[ -n "$Public_IPv6" ]]; then
-                IPv6="$Public_IPv6"
-                echo -e "${green}在接口 $i 上成功获取到IPv6: $IPv6${none}"
-                success=true
-            fi
-        fi
-        
-        # 如果两种IP都已获取到，可以提前退出循环
-        if [[ -n "$IPv4" && -n "$IPv6" ]]; then
-            break
-        fi
-    done
-
-    # 如果通过网络接口获取失败，尝试直接获取
-    if [[ -z "$IPv4" ]]; then
-        echo -e "${yellow}尝试直接获取IPv4...${none}"
-        IPv4=$(get_public_ip 4)
-        if [[ -n "$IPv4" ]]; then
-            echo -e "${green}成功获取到IPv4: $IPv4${none}"
-            success=true
-        fi
+        done
     fi
     
-    if [[ -z "$IPv6" ]]; then
-        echo -e "${yellow}尝试直接获取IPv6...${none}"
-        IPv6=$(get_public_ip 6)
-        if [[ -n "$IPv6" ]]; then
-            echo -e "${green}成功获取到IPv6: $IPv6${none}"
-            success=true
+    # 尝试直接获取IPv6
+    echo -e "${yellow}尝试直接获取IPv6...${none}"
+    IPV6=$(get_public_ip 6)
+    if [[ -n "$IPV6" ]]; then
+        echo -e "${green}成功获取到IPv6: $IPV6${none}"
+        success=true
+    else
+        # 获取网络接口列表
+        echo -e "${yellow}直接获取IPv6失败，尝试通过网络接口获取...${none}"
+        if [[ ${#InFaces[@]} -eq 0 ]]; then
+            InFaces=($(ls /sys/class/net/ | grep -E '^(eth|ens|eno|esp|enp|venet|vif)'))
         fi
+        
+        for i in "${InFaces[@]}"; do
+            echo -e "${yellow}正在检测接口 $i 的IPv6...${none}"
+            
+            # 尝试获取IPv6
+            Public_IPv6=$(get_public_ip 6 "$i")
+            if [[ -n "$Public_IPv6" ]]; then
+                IPV6="$Public_IPv6"
+                echo -e "${green}在接口 $i 上成功获取到IPv6: $IPV6${none}"
+                success=true
+                break
+            fi
+        done
     fi
 
     # 检查是否获取到任何IP
@@ -118,6 +243,47 @@ get_local_ips() {
     return 0
 }
 
+# 检查端口占用情况
+check_port() {
+    local port=$1
+    
+    if [[ -z "$port" ]]; then
+        echo -e "${red}错误: 未提供端口号${none}"
+        return 1
+    fi
+    
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
+        echo -e "${red}错误: 无效的端口号 '$port'。端口必须是1-65535之间的整数${none}"
+        return 1
+    fi
+    
+    # 检查端口是否已经被Xray使用
+    if check_port_exists "$port"; then
+        echo -e "${red}端口 $port 已被Xray配置占用${none}"
+        return 1
+    fi
+    
+    # 检查端口是否被其他程序占用
+    if lsof -i:"$port" >/dev/null 2>&1 || netstat -tunlp | grep -q ":$port "; then
+        local process=$(lsof -i:"$port" | grep LISTEN | awk '{print $1}' | head -n1)
+        local pid=$(lsof -i:"$port" | grep LISTEN | awk '{print $2}' | head -n1)
+        
+        if [[ -z "$process" ]]; then
+            process=$(netstat -tunlp | grep ":$port " | awk '{print $7}' | cut -d/ -f2 | head -n1)
+            pid=$(netstat -tunlp | grep ":$port " | awk '{print $7}' | cut -d/ -f1 | head -n1)
+        fi
+        
+        if [[ -n "$process" ]]; then
+            echo -e "${red}端口 $port 已被 $process (PID: $pid) 占用${none}"
+        else
+            echo -e "${red}端口 $port 已被其他程序占用${none}"
+        fi
+        return 1
+    fi
+    
+    return 0
+}
+
 error() {
     echo -e "\n$red 输入错误! $none\n"
 }
@@ -130,59 +296,161 @@ success() {
     echo -e "\n$green $1 $none\n"
 }
 
+info() {
+    echo -e "\n$cyan $1 $none\n"
+}
+
 pause() {
     read -rsp "$(echo -e "按 $green Enter 回车键 $none 继续....或按 $red Ctrl + C $none 取消.")" -d $'\n'
     echo
 }
 
+# 备份Xray配置文件
+backup_config() {
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cp "$CONFIG_FILE" "$BACKUP_DIR/config_${timestamp}.json"
+        echo -e "${green}配置已备份到: $BACKUP_DIR/config_${timestamp}.json${none}"
+        return 0
+    else
+        echo -e "${yellow}警告: 没有找到配置文件，跳过备份${none}"
+        return 1
+    fi
+}
+
+# 恢复备份的配置
+restore_config() {
+    local backup_files=("$BACKUP_DIR"/config_*.json)
+    
+    if [[ ! -d "$BACKUP_DIR" ]] || [[ ${#backup_files[@]} -eq 0 ]] || [[ ! -f "${backup_files[0]}" ]]; then
+        echo -e "${red}没有找到可用的备份配置文件${none}"
+        return 1
+    fi
+    
+    echo -e "${yellow}可用的备份配置:${none}"
+    local i=1
+    for file in "${backup_files[@]}"; do
+        if [[ -f "$file" ]]; then
+            local file_date=$(echo "$file" | grep -oP 'config_\K[0-9]+_[0-9]+')
+            file_date=${file_date//_/ }
+            echo -e "$green$i.$none ${cyan}$(basename "$file")${none} (备份于 ${file_date//_/:})"
+            i=$((i+1))
+        fi
+    done
+    
+    echo
+    read -p "$(echo -e "请选择要恢复的备份 [${green}1-$((i-1))${none}], 输入 0 取消: ")" choice
+    
+    if [[ "$choice" == "0" ]]; then
+        echo -e "${yellow}操作已取消${none}"
+        return 1
+    fi
+    
+    if [[ -z "$choice" ]] || ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ "$choice" -lt 1 ]] || [[ "$choice" -gt $((i-1)) ]]; then
+        echo -e "${red}选择无效${none}"
+        return 1
+    fi
+    
+    local selected_file="${backup_files[$((choice-1))]}"
+    
+    # 备份当前配置
+    backup_config
+    
+    # 恢复选择的备份
+    cp "$selected_file" "$CONFIG_FILE"
+    chmod 644 "$CONFIG_FILE"
+    
+    echo -e "${green}配置已从 $(basename "$selected_file") 恢复${none}"
+    
+    # 重启Xray服务
+    restart_xray
+    
+    return 0
+}
+
+# 重启Xray服务
+restart_xray() {
+    echo
+    echo -e "${yellow}正在重启 Xray 服务...${none}"
+    if systemctl restart xray; then
+        echo -e "${green}Xray 服务重启成功!${none}"
+        return 0
+    else
+        echo -e "${red}Xray 服务重启失败，请查看日志文件排查问题${none}"
+        echo -e "运行 ${cyan}journalctl -u xray --no-pager -n 50${none} 查看服务日志"
+        return 1
+    fi
+}
+
 # 更新 Xray GeoIP 和 GeoSite 数据
 update_geodata() {
     echo
-    echo -e "$yellow 更新 Xray GeoIP 和 GeoSite 数据 $none"
+    echo -e "${yellow}更新 Xray GeoIP 和 GeoSite 数据${none}"
     echo "----------------------------------------------------------------"
     
-    # 使用官方脚本更新
+    # 尝试使用官方脚本更新
+    echo -e "${cyan}使用官方脚本更新...${none}"
     if bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata; then
-        echo
-        echo -e "$green 数据库更新成功! $none"
-        
-        # 重启 Xray 服务
-        echo
-        echo -e "$yellow 重启 Xray 服务... $none"
-        if systemctl restart xray; then
-            echo -e "$green Xray 服务重启成功! $none"
-        else
-            echo -e "$red Xray 服务重启失败，请手动检查! $none"
-        fi
+        echo -e "${green}数据库更新成功!${none}"
+        restart_xray
+        return 0
     else
-        echo -e "$red 数据库更新失败! $none"
-        echo
-        echo -e "$yellow 尝试手动更新... $none"
+        echo -e "${red}使用官方脚本更新失败，尝试手动更新...${none}"
         
-        # 手动下载更新
-        if wget -O /usr/local/share/xray/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat && \
-           wget -O /usr/local/share/xray/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat; then
-            echo -e "$green 数据库手动更新成功! $none"
-            
-            # 重启 Xray 服务
-            echo
-            echo -e "$yellow 重启 Xray 服务... $none"
-            if systemctl restart xray; then
-                echo -e "$green Xray 服务重启成功! $none"
-            else
-                echo -e "$red Xray 服务重启失败，请手动检查! $none"
-            fi
-        else
-            echo -e "$red 数据库手动更新失败! $none"
+        # 创建临时目录
+        local temp_dir=$(mktemp -d)
+        cd "$temp_dir" || return 1
+        
+        echo -e "${cyan}1. 下载最新的 geoip.dat 文件...${none}"
+        if wget -q -O geoip.dat.new https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat; then
+            echo -e "${green}  GeoIP 下载成功${none}"
+        else 
+            echo -e "${red}  GeoIP 下载失败${none}"
+            cd - >/dev/null
+            rm -rf "$temp_dir"
+            return 1
         fi
+        
+        echo -e "${cyan}2. 下载最新的 geosite.dat 文件...${none}"
+        if wget -q -O geosite.dat.new https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat; then
+            echo -e "${green}  GeoSite 下载成功${none}"
+        else
+            echo -e "${red}  GeoSite 下载失败${none}"
+            cd - >/dev/null
+            rm -rf "$temp_dir"
+            return 1
+        fi
+        
+        # 安装新文件
+        echo -e "${cyan}3. 安装新的数据文件...${none}"
+        if mv geoip.dat.new /usr/local/share/xray/geoip.dat && \
+           mv geosite.dat.new /usr/local/share/xray/geosite.dat; then
+            echo -e "${green}  数据文件安装成功${none}"
+            # 设置正确的权限
+            chmod 644 /usr/local/share/xray/geoip.dat
+            chmod 644 /usr/local/share/xray/geosite.dat
+        else
+            echo -e "${red}  数据文件安装失败${none}"
+            cd - >/dev/null
+            rm -rf "$temp_dir"
+            return 1
+        fi
+        
+        # 清理临时目录
+        cd - >/dev/null
+        rm -rf "$temp_dir"
+        
+        # 重启服务
+        restart_xray
     fi
     
     # 显示当前 Xray 版本信息
     echo
-    echo -e "$yellow 当前 Xray 版本信息: $none"
+    echo -e "${yellow}当前 Xray 版本信息:${none}"
     xray --version
     echo
-    pause
+    
+    return 0
 }
 
 # 保存端口配置信息
@@ -195,14 +463,25 @@ save_port_info() {
     local domain=$6
     local socks5_enabled=$7
     local socks5_info=$8
+    local creation_time=$(date +%Y-%m-%d_%H:%M:%S)
 
     # 检查是否已存在相同端口的记录，如果存在则删除
     if [ -f "$PORT_INFO_FILE" ]; then
         sed -i "/^$port:/d" "$PORT_INFO_FILE"
+    else
+        # 如果文件不存在，创建空文件
+        touch "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"  # 设置安全的权限
     fi
 
-    # 添加新的端口记录
-    echo "$port:$uuid:$private_key:$public_key:$shortid:$domain:$socks5_enabled:$socks5_info" >> "$PORT_INFO_FILE"
+    # 添加新的端口记录，包含创建时间
+    echo "$port:$uuid:$private_key:$public_key:$shortid:$domain:$socks5_enabled:$socks5_info:$creation_time" >> "$PORT_INFO_FILE"
+    
+    # 排序端口信息文件按端口号升序
+    if [ -f "$PORT_INFO_FILE" ]; then
+        sort -t: -k1,1n "$PORT_INFO_FILE" -o "$PORT_INFO_FILE.sorted"
+        mv "$PORT_INFO_FILE.sorted" "$PORT_INFO_FILE"
+    fi
 }
 
 # 获取所有端口配置信息
@@ -240,17 +519,49 @@ delete_port_info() {
     local port=$1
     if [ -f "$PORT_INFO_FILE" ]; then
         sed -i "/^$port:/d" "$PORT_INFO_FILE"
+        return 0
     fi
+    return 1
 }
 
 # 读取配置文件并添加新的入站配置
 update_config_file() {
+    echo -e "${yellow}更新Xray配置文件...${none}"
+    
     # 备份当前配置
-    cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
+    backup_config
     
     # 读取当前配置到临时文件
     local temp_config=$(mktemp)
-    jq . "$CONFIG_FILE" > "$temp_config"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        jq . "$CONFIG_FILE" > "$temp_config" 2>/dev/null || {
+            echo -e "${red}读取当前配置文件失败，创建新配置${none}"
+            echo '{"log":{"loglevel":"warning","access":"/var/log/xray/access.log","error":"/var/log/xray/error.log"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"}],"routing":{"rules":[],"domainStrategy":"AsIs"}}' > "$temp_config"
+        }
+    else
+        echo -e "${yellow}配置文件不存在，创建新的配置${none}"
+        # 创建基础配置模板
+        cat > "$temp_config" << EOL
+{
+  "log": {
+    "loglevel": "warning",
+    "access": "/var/log/xray/access.log",
+    "error": "/var/log/xray/error.log"
+  },
+  "inbounds": [],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ],
+  "routing": {
+    "rules": [],
+    "domainStrategy": "AsIs"
+  }
+}
+EOL
+    fi
     
     # 读取所有端口信息
     local port_list=()
@@ -264,8 +575,14 @@ update_config_file() {
     # 创建新的配置
     jq 'del(.inbounds)' "$temp_config" > "$temp_config.new"
     
+    # 确保路由规则存在
+    jq 'if .routing == null then . += {"routing": {"rules": []}} 
+        elif .routing.rules == null then .routing += {"rules": []} 
+        else . end' "$temp_config.new" > "$temp_config"
+    
     # 添加inbounds数组
-    jq '. += {"inbounds": []}' "$temp_config.new" > "$temp_config"
+    jq '. += {"inbounds": []}' "$temp_config" > "$temp_config.new"
+    mv "$temp_config.new" "$temp_config"
     
     # 添加每个端口的配置
     for port in "${port_list[@]}"; do
@@ -303,7 +620,8 @@ update_config_file() {
       "privateKey": "${private_key}",
       "shortIds": ["${shortid}"]
     }
-  }
+  },
+  "tag": "port-${port}"
 }
 EOL
 
@@ -312,10 +630,17 @@ EOL
         mv "$temp_config.new" "$temp_config"
     done
     
-    # 处理SOCKS5代理输出
-    socks5_outbounds=()
-    socks5_routing_rules=()
+    # 重置outbounds
+    # 保留原有的outbounds，先删除可能存在的代理outbounds
+    jq '.outbounds = [.outbounds[] | select(.protocol != "socks")]' "$temp_config" > "$temp_config.new"
+    mv "$temp_config.new" "$temp_config"
     
+    # 重置routing rules
+    # 保留与socks代理无关的规则
+    jq '.routing.rules = [.routing.rules[] | select(.outboundTag | startswith("socks5-out-") | not)]' "$temp_config" > "$temp_config.new"
+    mv "$temp_config.new" "$temp_config"
+    
+    # 处理SOCKS5代理输出
     for port in "${port_list[@]}"; do
         port_info=$(get_port_info "$port")
         socks5_enabled=$(echo "$port_info" | cut -d: -f7)
@@ -370,7 +695,7 @@ EOL
             cat > "$temp_config.rule" << EOL
 {
   "type": "field",
-  "inboundTag": ["$port"],
+  "inboundTag": ["port-${port}"],
   "network": "$network_type",
   "outboundTag": "$socks5_tag"
 }
@@ -382,12 +707,17 @@ EOL
         fi
     done
     
-    # 应用新配置
-    cp "$temp_config" "$CONFIG_FILE"
+    # 确保日志目录存在
+    mkdir -p /var/log/xray
+
+    # 格式化最终的配置文件
+    jq . "$temp_config" > "$CONFIG_FILE"
     chmod 644 "$CONFIG_FILE"
     
     # 清理临时文件
     rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" 2>/dev/null
+    
+    echo -e "${green}配置文件更新完成${none}"
 }
 
 # 显示所有端口配置
@@ -401,7 +731,13 @@ list_port_configurations() {
         return
     fi
     
-    echo -e "${cyan}序号   端口    UUID    域名    代理状态${none}"
+    # 计算端口总数
+    local port_count=$(wc -l < "$PORT_INFO_FILE")
+    echo -e "${yellow}共配置了 ${cyan}${port_count}${yellow} 个端口${none}"
+    echo
+    
+    # 表头
+    echo -e "${cyan}序号   端口    UUID    域名    代理状态    创建时间${none}"
     echo "----------------------------------------------------------------"
     
     local index=1
@@ -412,14 +748,26 @@ list_port_configurations() {
         uuid_short="${uuid:0:8}...${uuid:24}"
         domain=$(echo "$line" | cut -d: -f6)
         socks5_enabled=$(echo "$line" | cut -d: -f7)
+        creation_time=$(echo "$line" | cut -d: -f9 || echo "未知")
+        creation_time=${creation_time//_/ }
         
         if [[ "$socks5_enabled" == "y" ]]; then
-            socks5_status="启用"
+            socks5_status="${green}启用${none}"
         else
-            socks5_status="禁用"
+            socks5_status="${red}禁用${none}"
         fi
         
-        echo -e "${green}$index${none}    ${cyan}$port${none}    ${yellow}$uuid_short${none}    ${magenta}$domain${none}    ${cyan}$socks5_status${none}"
+        # 检查端口当前是否在Xray中正常运行
+        local port_running="未知"
+        if $XRAY_RUNNING; then
+            if netstat -tunlp | grep -q "xray" | grep -q ":$port "; then
+                port_running="${green}运行中${none}"
+            else
+                port_running="${red}未运行${none}"
+            fi
+        fi
+        
+        echo -e "${green}$index${none}    ${cyan}$port${none}    ${yellow}$uuid_short${none}    ${magenta}$domain${none}    ${socks5_status}    ${blue}$creation_time${none}"
         index=$((index+1))
     done < "$PORT_INFO_FILE"
     
@@ -449,15 +797,15 @@ add_port_configuration() {
     read -p "$(echo -e "输入 ${cyan}4${none} 表示IPv4, ${cyan}6${none} 表示IPv6: ") " netstack
     
     if [[ $netstack = "4" ]]; then
-        ip=${IPv4}
+        ip=${IPV4}
     elif [[ $netstack = "6" ]]; then
-        ip=${IPv6}
+        ip=${IPV6}
     else
-        if [[ -n "$IPv4" ]]; then
-            ip=${IPv4}
+        if [[ -n "$IPV4" ]]; then
+            ip=${IPV4}
             netstack=4
-        elif [[ -n "$IPv6" ]]; then
-            ip=${IPv6}
+        elif [[ -n "$IPV6" ]]; then
+            ip=${IPV6}
             netstack=6
         else
             warn "没有获取到公共IP"
@@ -472,20 +820,7 @@ add_port_configuration() {
             continue
         fi
         
-        if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
-            error
-            continue
-        fi
-        
-        # 检查端口是否已被使用
-        if check_port_exists "$port"; then
-            echo -e "${red}端口 $port 已被配置，请选择其他端口${none}"
-            continue
-        fi
-        
-        # 检查端口是否被占用
-        if lsof -i:"$port" >/dev/null 2>&1; then
-            echo -e "${red}端口 $port 已被其他程序占用，请选择其他端口${none}"
+        if ! check_port "$port"; then
             continue
         fi
         
@@ -496,8 +831,8 @@ add_port_configuration() {
     done
     
     # 生成UUID
-    uuidSeed=${ip}$(cat /proc/sys/kernel/hostname)$(cat /etc/timezone)
-    default_uuid=$(curl -sL https://www.uuidtools.com/api/generate/v3/namespace/ns:dns/name/${uuidSeed} | grep -oP '[^-]{8}-[^-]{4}-[^-]{4}-[^-]{4}-[^-]{12}')
+    uuidSeed=${ip}$(cat /proc/sys/kernel/hostname 2>/dev/null || hostname)$(cat /etc/timezone 2>/dev/null || date +%Z)
+    default_uuid=$(generate_uuid "$uuidSeed")
     
     while :; do
         echo -e "请输入 "${yellow}"UUID"${none}" "
@@ -516,6 +851,11 @@ add_port_configuration() {
     done
     
     # 生成密钥
+    if ! command -v xray &>/dev/null; then
+        echo -e "${red}错误: 未安装xray，无法生成密钥${none}"
+        return 1
+    fi
+    
     private_key=$(echo -n ${uuid} | md5sum | head -c 32 | base64 -w 0 | tr '+/' '-_' | tr -d '=')
     tmp_key=$(echo -n ${private_key} | xargs xray x25519 -i)
     default_private_key=$(echo ${tmp_key} | awk '{print $3}')
@@ -621,13 +961,7 @@ add_port_configuration() {
     update_config_file
     
     # 重启 Xray
-    echo
-    echo -e "$yellow 重启 Xray 服务... $none"
-    if systemctl restart xray; then
-        echo -e "$green Xray 服务重启成功! $none"
-    else
-        echo -e "$red Xray 服务重启失败，请手动检查! $none"
-    fi
+    restart_xray
     
     # 生成连接信息
     generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
@@ -676,16 +1010,23 @@ generate_connection_info() {
     echo -e "${cyan}${vless_reality_url}${none}"
     echo
     
-    # 生成二维码
-    echo "二维码:"
-    qrencode -t UTF8 "$vless_reality_url"
+    # 检查qrencode是否安装
+    if command -v qrencode >/dev/null 2>&1; then
+        echo "二维码:"
+        qrencode -t UTF8 "$vless_reality_url"
+    else
+        echo -e "${yellow}未安装qrencode，无法生成二维码，可执行 'apt install qrencode' 安装${none}"
+    fi
     
     # 保存信息到文件
-    echo "$vless_reality_url" > "$HOME/_vless_reality_url_${port}_"
-    qrencode -t UTF8 "$vless_reality_url" >> "$HOME/_vless_reality_url_${port}_"
+    local output_file="$HOME/_vless_reality_url_${port}_"
+    echo "$vless_reality_url" > "$output_file"
+    if command -v qrencode >/dev/null 2>&1; then
+        qrencode -t UTF8 "$vless_reality_url" >> "$output_file"
+    fi
     
     echo
-    echo "链接信息已保存到 $HOME/_vless_reality_url_${port}_"
+    echo "链接信息已保存到 $output_file"
 }
 
 # 修改端口配置
@@ -705,7 +1046,12 @@ modify_port_configuration() {
     # 选择要修改的端口
     local port_count=$(wc -l < "$PORT_INFO_FILE")
     while :; do
-        read -p "$(echo -e "请选择要修改的配置序号 [${green}1-$port_count${none}]: ")" port_index
+        read -p "$(echo -e "请选择要修改的配置序号 [${green}1-$port_count${none}], 输入 0 取消: ")" port_index
+        
+        if [[ "$port_index" == "0" ]]; then
+            echo -e "${yellow}操作已取消${none}"
+            return
+        fi
         
         if [[ -z "$port_index" ]] || ! [[ "$port_index" =~ ^[0-9]+$ ]] || [[ "$port_index" -lt 1 ]] || [[ "$port_index" -gt "$port_count" ]]; then
             error
@@ -734,10 +1080,11 @@ modify_port_configuration() {
     echo -e "  ${green}2.${none} 修改域名(SNI)"
     echo -e "  ${green}3.${none} 修改ShortID"
     echo -e "  ${green}4.${none} 修改SOCKS5代理设置"
-    echo -e "  ${green}5.${none} 返回上一级菜单"
+    echo -e "  ${green}5.${none} 修改端口号"
+    echo -e "  ${green}6.${none} 返回上一级菜单"
     echo "----------------------------------------------------------------"
     
-    read -p "$(echo -e "请选择 [${green}1-5${none}]: ")" modify_choice
+    read -p "$(echo -e "请选择 [${green}1-6${none}]: ")" modify_choice
     
     case $modify_choice in
         1)
@@ -748,9 +1095,9 @@ modify_port_configuration() {
             echo -e "当前UUID: $cyan$old_uuid$none"
             
             # 生成新的默认UUID
-            local ip=$([ "$netstack" = "6" ] && echo "$IPv6" || echo "$IPv4")
-            local uuidSeed=${ip}$(cat /proc/sys/kernel/hostname)$(cat /etc/timezone)
-            local default_uuid=$(curl -sL https://www.uuidtools.com/api/generate/v3/namespace/ns:dns/name/${uuidSeed} | grep -oP '[^-]{8}-[^-]{4}-[^-]{4}-[^-]{4}-[^-]{12}')
+            local ip=$([ "$netstack" = "6" ] && echo "$IPV6" || echo "$IPV4")
+            local uuidSeed=${ip}$(cat /proc/sys/kernel/hostname 2>/dev/null || hostname)$(cat /etc/timezone 2>/dev/null || date +%Z)
+            local default_uuid=$(generate_uuid "$uuidSeed")
             
             while :; do
                 echo -e "请输入新的UUID"
