@@ -242,57 +242,6 @@ delete_port_info() {
         sed -i "/^$port:/d" "$PORT_INFO_FILE"
     fi
 }
-# 卸载 Xray 的函数
-uninstall_xray() {
-    echo
-    echo -e "$yellow 卸载 Xray $none"
-    echo "----------------------------------------------------------------"
-    
-    echo -e "${red}警告: 此操作将完全卸载 Xray 并删除所有配置信息!${none}"
-    echo -e "${red}      所有端口配置和连接信息将被清除!${none}"
-    echo
-    
-    read -p "$(echo -e "确认卸载? 输入 ${red}uninstall${none} 确认操作: ")" confirm
-    
-    if [[ "$confirm" != "uninstall" ]]; then
-        echo -e "$yellow 操作已取消 $none"
-        return
-    fi
-    
-    # 卸载 Xray
-    echo -e "$yellow 正在卸载 Xray... $none"
-    
-    # 使用官方脚本卸载
-    if bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge; then
-        echo -e "$green Xray 卸载成功! $none"
-    else
-        echo -e "$red Xray 卸载失败! 请检查错误信息 $none"
-    fi
-    
-    # 删除配置信息文件
-    if [ -f "$PORT_INFO_FILE" ]; then
-        rm -f "$PORT_INFO_FILE"
-        echo -e "$green 端口配置信息已删除 $none"
-    fi
-    
-    # 删除连接信息文件
-    rm -f "$HOME/_vless_reality_url_"*
-    echo -e "$green 连接信息文件已删除 $none"
-    
-    echo
-    echo -e "$green Xray 已完全卸载! $none"
-    pause
-    
-    # 询问是否退出脚本
-    read -p "$(echo -e "是否退出脚本? (y/n, 默认: ${cyan}y${none}): ")" exit_script
-    [ -z "$exit_script" ] && exit_script="y"
-    
-    if [[ "$exit_script" == "y" ]]; then
-        exit 0
-    else
-        show_menu
-    fi
-}
 
 # 读取配置文件并添加新的入站配置
 update_config_file() {
@@ -302,17 +251,6 @@ update_config_file() {
     # 读取当前配置到临时文件
     local temp_config=$(mktemp)
     jq . "$CONFIG_FILE" > "$temp_config"
-    # 确保有 routing 部分
-    if ! jq -e '.routing' "$temp_config" > /dev/null; then
-        jq '. += {"routing": {"domainStrategy": "AsIs", "rules": []}}' "$temp_config" > "$temp_config.new"
-        mv "$temp_config.new" "$temp_config"
-    fi
-
-    # 确保有 rules 部分
-    if ! jq -e '.routing.rules' "$temp_config" > /dev/null; then
-        jq '.routing += {"rules": []}' "$temp_config" > "$temp_config.new"
-        mv "$temp_config.new" "$temp_config"
-    fi
     
     # 读取所有端口信息
     local port_list=()
@@ -375,6 +313,9 @@ EOL
     done
     
     # 处理SOCKS5代理输出
+    socks5_outbounds=()
+    socks5_routing_rules=()
+    
     for port in "${port_list[@]}"; do
         port_info=$(get_port_info "$port")
         socks5_enabled=$(echo "$port_info" | cut -d: -f7)
@@ -383,7 +324,7 @@ EOL
         if [[ "$socks5_enabled" == "y" ]]; then
             IFS='|' read -r socks5_address socks5_port auth_needed socks5_user socks5_pass udp_over_tcp <<< "$socks5_info"
             
-            # 为每个端口创建唯一的出站标签
+            # 为每个SOCKS5配置创建一个唯一标识
             socks5_tag="socks5-out-$port"
             
             # 创建SOCKS5出站配置
@@ -424,16 +365,13 @@ EOL
             jq '.outbounds += [input]' "$temp_config" "$temp_config.socks5" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
             
-            # 为该端口创建专用的入站标签
-            jq --arg port "$port" '(.inbounds[] | select(.port == ($port | tonumber))) += {"tag": $port}' "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
-            
             # 创建路由规则
             network_type=$([ "$udp_over_tcp" = "y" ] && echo "tcp,udp" || echo "tcp")
             cat > "$temp_config.rule" << EOL
 {
   "type": "field",
   "inboundTag": ["$port"],
+  "network": "$network_type",
   "outboundTag": "$socks5_tag"
 }
 EOL
@@ -1211,10 +1149,9 @@ show_menu() {
     echo -e "  ${green}5.${none} 删除端口配置"
     echo -e "  ${green}6.${none} 显示所有端口连接信息"
     echo -e "  ${green}7.${none} 更新 GeoIP 和 GeoSite 数据"
-    echo -e "  ${green}8.${none} 卸载 Xray"
     echo -e "  ${green}0.${none} 退出"
     echo "------------------------------------"
-    read -p "请选择 [0-8]: " choice
+    read -p "请选择 [0-7]: " choice
 
     case $choice in
         1)
@@ -1245,9 +1182,6 @@ show_menu() {
         7)
             update_geodata
             show_menu
-            ;;
-        8)
-            uninstall_xray
             ;;
         0)
             exit 0
