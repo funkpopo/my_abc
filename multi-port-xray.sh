@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -1428,7 +1428,57 @@ delete_port_configuration() {
     
     pause
 }
-
+# 卸载 Xray 的函数
+uninstall_xray() {
+    echo
+    echo -e "$yellow 卸载 Xray $none"
+    echo "----------------------------------------------------------------"
+    
+    echo -e "${red}警告: 此操作将完全卸载 Xray 并删除所有配置信息!${none}"
+    echo -e "${red}      所有端口配置和连接信息将被清除!${none}"
+    echo
+    
+    read -p "$(echo -e "确认卸载? 输入 ${red}uninstall${none} 确认操作: ")" confirm
+    
+    if [[ "$confirm" != "uninstall" ]]; then
+        echo -e "$yellow 操作已取消 $none"
+        return
+    fi
+    
+    # 卸载 Xray
+    echo -e "$yellow 正在卸载 Xray... $none"
+    
+    # 使用官方脚本卸载
+    if bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge; then
+        echo -e "$green Xray 卸载成功! $none"
+    else
+        echo -e "$red Xray 卸载失败! 请检查错误信息 $none"
+    fi
+    
+    # 删除配置信息文件
+    if [ -f "$PORT_INFO_FILE" ]; then
+        rm -f "$PORT_INFO_FILE"
+        echo -e "$green 端口配置信息已删除 $none"
+    fi
+    
+    # 删除连接信息文件
+    rm -f "$HOME/_vless_reality_url_"*
+    echo -e "$green 连接信息文件已删除 $none"
+    
+    echo
+    echo -e "$green Xray 已完全卸载! $none"
+    pause
+    
+    # 询问是否退出脚本
+    read -p "$(echo -e "是否退出脚本? (y/n, 默认: ${cyan}y${none}): ")" exit_script
+    [ -z "$exit_script" ] && exit_script="y"
+    
+    if [[ "$exit_script" == "y" ]]; then
+        exit 0
+    else
+        show_menu
+    fi
+}
 # 显示所有端口的连接信息
 show_all_connections() {
     echo
@@ -1843,6 +1893,7 @@ show_menu() {
     echo -e "  ${green}11.${none} 检查脚本更新"
     echo -e "  ${green}12.${none} 查看 Xray 日志"
     echo -e "  ${green}13.${none} 帮助信息"
+    echo -e "  ${green}14.${none} 卸载 Xray"
     echo -e "  ${green}0.${none} 退出"
     echo "------------------------------------"
     read -p "请选择 [0-13]: " choice
@@ -1901,6 +1952,9 @@ show_menu() {
             ;;
         13)
             show_help
+            ;;
+        14)
+            uninstall_xray
             ;;
         0)
             echo -e "${green}感谢使用 Xray 多端口管理脚本${none}"
