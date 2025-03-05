@@ -397,15 +397,17 @@ cat > "$CONFIG_FILE" << EOL
     "error": "/var/log/xray/error.log"
   },
   "dns": {
-    "servers": [
-      "tcp://8.8.8.8:53",
-      "tcp://8.8.4.4:53"
-    ],
-    "queryStrategy": "UseIP",
-    "disableCache": false,
-    "disableFallback": false,
-    "tag": "dns-out"
-  },
+  "servers": [
+    "localhost",
+    "127.0.0.1",
+    "8.8.8.8",
+    "8.8.4.4"
+  ],
+  "queryStrategy": "UseIP",
+  "disableCache": false,
+  "disableFallback": false,
+  "tag": "dns-out"
+},
   "inbounds": [],
   "outbounds": [
     {
