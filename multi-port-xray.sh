@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.2"
+VERSION="1.2.3"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -545,13 +545,9 @@ EOL
         "port": ${socks5_port}
 EOL
 
-            if [[ "$udp_over_tcp" == "true" ]]; then
+            if [[ "$auth_needed" == "true" ]]; then
                 cat >> "$temp_config.socks5" << EOL
-  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}},"transportLayer": true
-EOL
-            else
-                cat >> "$temp_config.socks5" << EOL
-  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}}
+        ,"users": [{"user": "${socks5_user}","pass": "${socks5_pass}"}]
 EOL
             fi
             
@@ -563,7 +559,11 @@ EOL
 
             if [[ "$udp_over_tcp" == "true" ]]; then
                 cat >> "$temp_config.socks5" << EOL
-  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15}},"transportLayer": true
+  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}},"transportLayer": true
+EOL
+            else
+                cat >> "$temp_config.socks5" << EOL
+  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}}
 EOL
             fi
             
