@@ -1001,31 +1001,6 @@ configure_socks5_for_port() {
     # 设置SOCKS5代理配置
     set_port_socks5_config "$port" "y" "$socks5_address" "$socks5_port" "$auth_needed" "$socks5_user" "$socks5_pass" "$udp_over_tcp"
     
-    # 测试SOCKS5连接
-    echo -e "${yellow}正在测试SOCKS5连接...${none}"
-    if command -v curl &> /dev/null; then
-        echo -e "将使用curl测试连接..."
-        if [[ "$auth_needed" == "y" ]]; then
-            if curl --connect-timeout 10 --socks5 "$socks5_address:$socks5_port" -U "$socks5_user:$socks5_pass" -s https://www.google.com -o /dev/null; then
-                echo -e "${green}SOCKS5代理连接测试成功!${none}"
-                log_info "SOCKS5代理连接测试成功: $socks5_address:$socks5_port"
-            else
-                echo -e "${red}SOCKS5代理连接测试失败!${none}"
-                echo -e "${yellow}请检查SOCKS5服务器是否正常工作${none}"
-                log_warn "SOCKS5代理连接测试失败: $socks5_address:$socks5_port"
-            fi
-        else
-            if curl --connect-timeout 10 --socks5 "$socks5_address:$socks5_port" -s https://www.google.com -o /dev/null; then
-                echo -e "${green}SOCKS5代理连接测试成功!${none}"
-                log_info "SOCKS5代理连接测试成功: $socks5_address:$socks5_port"
-            else
-                echo -e "${red}SOCKS5代理连接测试失败!${none}"
-                echo -e "${yellow}请检查SOCKS5服务器是否正常工作${none}"
-                log_warn "SOCKS5代理连接测试失败: $socks5_address:$socks5_port"
-            fi
-        fi
-    fi
-    
     echo -e "${green}SOCKS5 代理配置成功添加到端口 $port${none}"
     log_info "为端口 $port 配置 SOCKS5 代理"
     return 0
