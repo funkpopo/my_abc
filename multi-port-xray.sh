@@ -388,16 +388,30 @@ update_config_file() {
         cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     fi
     
-    # 创建基本配置
-    cat > "$CONFIG_FILE" << EOL
+# 创建基本配置
+cat > "$CONFIG_FILE" << EOL
 {
   "log": {
     "loglevel": "warning",
     "access": "/var/log/xray/access.log",
     "error": "/var/log/xray/error.log"
   },
+  "dns": {
+    "servers": [
+      "tcp://8.8.8.8:53",
+      "tcp://8.8.4.4:53"
+    ],
+    "queryStrategy": "UseIP",
+    "disableCache": false,
+    "disableFallback": false,
+    "tag": "dns-out"
+  },
   "inbounds": [],
   "outbounds": [
+    {
+      "protocol": "dns",
+      "tag": "dns-out"
+    },
     {
       "protocol": "freedom",
       "settings": {},
@@ -527,16 +541,62 @@ EOL
             # 创建路由规则
             local network_type=$(if [[ "$udp_over_tcp" == "true" ]]; then echo "tcp,udp"; else echo "tcp"; fi)
             cat > "$temp_config.rule" << EOL
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "outboundTag": "${socks5_tag}"
-}
-EOL
+            {
+            "type": "field",
+            "inboundTag": ["inbound-${port}"],
+            "outboundTag": "${socks5_tag}"
+            }
+            EOL
             
             # 添加路由规则
             jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
+            # 创建DNS流量路由规则
+            cat > "$temp_config.dns_rule" << EOL
+            {
+            "type": "field",
+            "outboundTag": "${socks5_tag}",
+            "port": 53,
+            "network": "tcp"
+            }
+            EOL
+
+            # 添加DNS路由规则
+            jq ".routing.rules = [$(cat "$temp_config.dns_rule")] + .routing.rules" "$temp_config" > "$temp_config.new"
+            mv "$temp_config.new" "$temp_config"
+
+            # 创建DNS入站配置
+            cat > "$temp_config.dns_inbound" << EOL
+            {
+            "listen": "127.0.0.1",
+            "port": 53,
+            "protocol": "dokodemo-door",
+            "settings": {
+                "address": "8.8.8.8",
+                "port": 53,
+                "network": "tcp"
+            },
+            "tag": "dns-in"
+            }
+            EOL
+
+            # 添加DNS入站配置
+            jq ".inbounds += [$(cat "$temp_config.dns_inbound")]" "$temp_config" > "$temp_config.new"
+            mv "$temp_config.new" "$temp_config"
+
+            # 创建DNS入站路由规则
+            cat > "$temp_config.dns_route" << EOL
+            {
+            "type": "field",
+            "inboundTag": ["dns-in"],
+            "outboundTag": "${socks5_tag}"
+            }
+            EOL
+
+            # 添加DNS入站路由规则
+            jq ".routing.rules = [$(cat "$temp_config.dns_route")] + .routing.rules" "$temp_config" > "$temp_config.new"
+            mv "$temp_config.new" "$temp_config"
+
         fi
     done
     
@@ -545,8 +605,8 @@ EOL
     chmod 644 "$CONFIG_FILE"
     
     # 清理临时文件
-    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" 2>/dev/null
-    
+    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.dns_inbound" "$temp_config.dns_route" 2>/dev/null
+
     log_info "配置文件已更新"
 }
 
