@@ -49,6 +49,37 @@ log_warn() {
     log "WARN" "$1"
 }
 
+# TCP优化函数
+optimize_tcp() {
+    echo -e "${yellow}正在优化TCP连接参数...${none}"
+    log_info "开始优化TCP连接参数"
+    
+    # 备份原始配置
+    cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%Y%m%d%H%M%S)
+    
+    # 设置TCP Fast Open
+    echo 3 > /proc/sys/net/ipv4/tcp_fastopen
+    
+    # 调整TCP缓冲区和连接参数
+    cat >> /etc/sysctl.conf << EOF
+# TCP优化参数
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_keepalive_time = 1200
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_max_tw_buckets = 5000
+net.ipv4.tcp_mtu_probing = 1
+EOF
+    
+    # 应用配置
+    sysctl -p > /dev/null 2>&1
+    
+    log_info "TCP优化完成"
+}
+
 # 获取公共IP的函数
 get_public_ip() {
     local ip_type=$1  # 4 for IPv4, 6 for IPv6
@@ -453,7 +484,7 @@ EOL
         local domain=$(echo "$port_info" | jq -r '.domain')
         
         # 创建入站配置
-        cat > "$temp_config.inbound" << EOL
+cat > "$temp_config.inbound" << EOL
 {
   "listen": "0.0.0.0",
   "port": ${port},
@@ -478,6 +509,10 @@ EOL
       "privateKey": "${private_key}",
       "shortIds": ["${shortid}"]
     }
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls", "quic"]
   },
   "tag": "inbound-${port}"
 }
@@ -510,9 +545,13 @@ EOL
         "port": ${socks5_port}
 EOL
 
-            if [[ "$auth_needed" == "true" ]]; then
+            if [[ "$udp_over_tcp" == "true" ]]; then
                 cat >> "$temp_config.socks5" << EOL
-        ,"users": [{"user": "${socks5_user}","pass": "${socks5_pass}"}]
+  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}},"transportLayer": true
+EOL
+            else
+                cat >> "$temp_config.socks5" << EOL
+  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}}
 EOL
             fi
             
@@ -546,6 +585,20 @@ EOL
   "outboundTag": "${socks5_tag}"
 }
 EOL
+            
+            # 添加DNS路由规则
+            cat > "$temp_config.dns_rule" << EOL
+{
+  "type": "field",
+  "inboundTag": ["inbound-${port}"],
+  "port": 53,
+  "outboundTag": "dns-out"
+}
+EOL
+            
+            # 添加DNS路由规则
+            jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
+            mv "$temp_config.new" "$temp_config"
             
             # 添加路由规则
             jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
@@ -947,6 +1000,31 @@ configure_socks5_for_port() {
     
     # 设置SOCKS5代理配置
     set_port_socks5_config "$port" "y" "$socks5_address" "$socks5_port" "$auth_needed" "$socks5_user" "$socks5_pass" "$udp_over_tcp"
+    
+    # 测试SOCKS5连接
+    echo -e "${yellow}正在测试SOCKS5连接...${none}"
+    if command -v curl &> /dev/null; then
+        echo -e "将使用curl测试连接..."
+        if [[ "$auth_needed" == "y" ]]; then
+            if curl --connect-timeout 10 --socks5 "$socks5_address:$socks5_port" -U "$socks5_user:$socks5_pass" -s https://www.google.com -o /dev/null; then
+                echo -e "${green}SOCKS5代理连接测试成功!${none}"
+                log_info "SOCKS5代理连接测试成功: $socks5_address:$socks5_port"
+            else
+                echo -e "${red}SOCKS5代理连接测试失败!${none}"
+                echo -e "${yellow}请检查SOCKS5服务器是否正常工作${none}"
+                log_warn "SOCKS5代理连接测试失败: $socks5_address:$socks5_port"
+            fi
+        else
+            if curl --connect-timeout 10 --socks5 "$socks5_address:$socks5_port" -s https://www.google.com -o /dev/null; then
+                echo -e "${green}SOCKS5代理连接测试成功!${none}"
+                log_info "SOCKS5代理连接测试成功: $socks5_address:$socks5_port"
+            else
+                echo -e "${red}SOCKS5代理连接测试失败!${none}"
+                echo -e "${yellow}请检查SOCKS5服务器是否正常工作${none}"
+                log_warn "SOCKS5代理连接测试失败: $socks5_address:$socks5_port"
+            fi
+        fi
+    fi
     
     echo -e "${green}SOCKS5 代理配置成功添加到端口 $port${none}"
     log_info "为端口 $port 配置 SOCKS5 代理"
@@ -1717,6 +1795,10 @@ install_xray() {
     echo
     echo -e "$green Xray 安装完成！$none"
     log_info "Xray 安装完成"
+
+    # 优化TCP参数
+    optimize_tcp
+
     echo -e "$yellow 接下来您需要添加端口配置 $none"
     pause
     
