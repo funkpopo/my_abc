@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.0"
+VERSION="1.2.5"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -47,6 +47,37 @@ log_error() {
 
 log_warn() {
     log "WARN" "$1"
+}
+
+# TCP优化函数
+optimize_tcp() {
+    echo -e "${yellow}正在优化TCP连接参数...${none}"
+    log_info "开始优化TCP连接参数"
+    
+    # 备份原始配置
+    cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%Y%m%d%H%M%S)
+    
+    # 设置TCP Fast Open
+    echo 3 > /proc/sys/net/ipv4/tcp_fastopen
+    
+    # 调整TCP缓冲区和连接参数
+    cat >> /etc/sysctl.conf << EOF
+# TCP优化参数
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_keepalive_time = 1200
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_max_tw_buckets = 5000
+net.ipv4.tcp_mtu_probing = 1
+EOF
+    
+    # 应用配置
+    sysctl -p > /dev/null 2>&1
+    
+    log_info "TCP优化完成"
 }
 
 # 获取公共IP的函数
@@ -388,20 +419,33 @@ update_config_file() {
         cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     fi
     
-    # 创建基本配置
-    cat > "$CONFIG_FILE" << EOL
+# 创建基本配置
+cat > "$CONFIG_FILE" << EOL
 {
   "log": {
     "loglevel": "warning",
     "access": "/var/log/xray/access.log",
     "error": "/var/log/xray/error.log"
   },
+  "dns": {
+  "servers": [
+    "8.8.8.8",
+    "8.8.4.4",
+    "localhost"
+  ],
+  "queryStrategy": "UseIPv4",
+  "tag": "dns-out"
+},
   "inbounds": [],
   "outbounds": [
     {
       "protocol": "freedom",
       "settings": {},
       "tag": "direct"
+    },
+    {
+      "protocol": "dns",
+      "tag": "dns-out"
     },
     {
       "protocol": "blackhole",
@@ -440,7 +484,7 @@ EOL
         local domain=$(echo "$port_info" | jq -r '.domain')
         
         # 创建入站配置
-        cat > "$temp_config.inbound" << EOL
+cat > "$temp_config.inbound" << EOL
 {
   "listen": "0.0.0.0",
   "port": ${port},
@@ -465,6 +509,10 @@ EOL
       "privateKey": "${private_key}",
       "shortIds": ["${shortid}"]
     }
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls", "quic"]
   },
   "tag": "inbound-${port}"
 }
@@ -511,7 +559,11 @@ EOL
 
             if [[ "$udp_over_tcp" == "true" ]]; then
                 cat >> "$temp_config.socks5" << EOL
-  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15}},"transportLayer": true
+  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}},"transportLayer": true
+EOL
+            else
+                cat >> "$temp_config.socks5" << EOL
+  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}}
 EOL
             fi
             
@@ -534,9 +586,25 @@ EOL
 }
 EOL
             
+            # 添加DNS路由规则
+            cat > "$temp_config.dns_rule" << EOL
+{
+  "type": "field",
+  "inboundTag": ["inbound-${port}"],
+  "port": 53,
+  "outboundTag": "dns-out"
+}
+EOL
+            
+            # 添加DNS路由规则
+            jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
+            mv "$temp_config.new" "$temp_config"
+            
             # 添加路由规则
             jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
+            
+
         fi
     done
     
@@ -545,8 +613,8 @@ EOL
     chmod 644 "$CONFIG_FILE"
     
     # 清理临时文件
-    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" 2>/dev/null
-    
+    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" 2>/dev/null
+
     log_info "配置文件已更新"
 }
 
@@ -1702,6 +1770,10 @@ install_xray() {
     echo
     echo -e "$green Xray 安装完成！$none"
     log_info "Xray 安装完成"
+
+    # 优化TCP参数
+    optimize_tcp
+
     echo -e "$yellow 接下来您需要添加端口配置 $none"
     pause
     
