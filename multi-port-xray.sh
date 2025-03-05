@@ -541,25 +541,26 @@ EOL
             # 创建路由规则
             local network_type=$(if [[ "$udp_over_tcp" == "true" ]]; then echo "tcp,udp"; else echo "tcp"; fi)
             cat > "$temp_config.rule" << EOL
-            {
-            "type": "field",
-            "inboundTag": ["inbound-${port}"],
-            "outboundTag": "${socks5_tag}"
-            }
-            EOL
+{
+  "type": "field",
+  "inboundTag": ["inbound-${port}"],
+  "outboundTag": "${socks5_tag}"
+}
+EOL
             
             # 添加路由规则
             jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
+            
             # 创建DNS流量路由规则
             cat > "$temp_config.dns_rule" << EOL
-            {
-            "type": "field",
-            "outboundTag": "${socks5_tag}",
-            "port": 53,
-            "network": "tcp"
-            }
-            EOL
+{
+  "type": "field",
+  "outboundTag": "${socks5_tag}",
+  "port": 53,
+  "network": "tcp"
+}
+EOL
 
             # 添加DNS路由规则
             jq ".routing.rules = [$(cat "$temp_config.dns_rule")] + .routing.rules" "$temp_config" > "$temp_config.new"
@@ -567,18 +568,18 @@ EOL
 
             # 创建DNS入站配置
             cat > "$temp_config.dns_inbound" << EOL
-            {
-            "listen": "127.0.0.1",
-            "port": 53,
-            "protocol": "dokodemo-door",
-            "settings": {
-                "address": "8.8.8.8",
-                "port": 53,
-                "network": "tcp"
-            },
-            "tag": "dns-in"
-            }
-            EOL
+{
+  "listen": "127.0.0.1",
+  "port": 53,
+  "protocol": "dokodemo-door",
+  "settings": {
+    "address": "8.8.8.8",
+    "port": 53,
+    "network": "tcp"
+  },
+  "tag": "dns-in"
+}
+EOL
 
             # 添加DNS入站配置
             jq ".inbounds += [$(cat "$temp_config.dns_inbound")]" "$temp_config" > "$temp_config.new"
@@ -586,12 +587,12 @@ EOL
 
             # 创建DNS入站路由规则
             cat > "$temp_config.dns_route" << EOL
-            {
-            "type": "field",
-            "inboundTag": ["dns-in"],
-            "outboundTag": "${socks5_tag}"
-            }
-            EOL
+{
+  "type": "field",
+  "inboundTag": ["dns-in"],
+  "outboundTag": "${socks5_tag}"
+}
+EOL
 
             # 添加DNS入站路由规则
             jq ".routing.rules = [$(cat "$temp_config.dns_route")] + .routing.rules" "$temp_config" > "$temp_config.new"
