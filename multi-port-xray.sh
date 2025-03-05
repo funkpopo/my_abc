@@ -398,14 +398,11 @@ cat > "$CONFIG_FILE" << EOL
   },
   "dns": {
   "servers": [
-    "localhost",
-    "127.0.0.1",
     "8.8.8.8",
-    "8.8.4.4"
+    "8.8.4.4",
+    "localhost"
   ],
-  "queryStrategy": "UseIP",
-  "disableCache": false,
-  "disableFallback": false,
+  "queryStrategy": "UseIPv4",
   "tag": "dns-out"
 },
   "inbounds": [],
