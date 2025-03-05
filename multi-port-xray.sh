@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.3"
+VERSION="1.2.5"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -439,13 +439,13 @@ cat > "$CONFIG_FILE" << EOL
   "inbounds": [],
   "outbounds": [
     {
-      "protocol": "dns",
-      "tag": "dns-out"
-    },
-    {
       "protocol": "freedom",
       "settings": {},
       "tag": "direct"
+    },
+    {
+      "protocol": "dns",
+      "tag": "dns-out"
     },
     {
       "protocol": "blackhole",
@@ -613,7 +613,7 @@ EOL
     chmod 644 "$CONFIG_FILE"
     
     # 清理临时文件
-    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.dns_inbound" "$temp_config.dns_route" 2>/dev/null
+    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" 2>/dev/null
 
     log_info "配置文件已更新"
 }
