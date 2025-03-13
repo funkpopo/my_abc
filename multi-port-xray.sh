@@ -1430,7 +1430,8 @@ manage_port_users() {
     local port=$1
     
     while true; do
-        clear  # 清理屏幕，避免内容堆积
+        clear  # 清理屏幕
+        
         local port_info=$(get_port_info "$port")
         if [[ $? -ne 0 ]]; then
             log_error "获取端口 $port 信息失败"
@@ -1483,7 +1484,7 @@ manage_port_users() {
         
         case $user_choice in
             1)
-                # 查看所有用户 
+                # 查看所有用户
                 list_port_users "$port"
                 ;;
                 
@@ -1503,13 +1504,13 @@ manage_port_users() {
                 ;;
                 
             5)
-                # 返回上一级菜单 - 不要再调用任何函数，直接退出循环                
+                # 返回上一级菜单 - 直接退出循环
                 return 0
                 ;;
                 
             *)
                 error
-                pause  # 添加暂停，让用户看到错误信息
+                pause
                 ;;
         esac
     done
@@ -1520,7 +1521,7 @@ list_port_users() {
     local port=$1
     local port_info=$(get_port_info "$port")
     
-    clear  # 清理屏幕
+    clear  # 清屏
     echo
     echo -e "$yellow 端口 $port 的所有用户 $none"
     echo "----------------------------------------------------------------"
@@ -1529,8 +1530,7 @@ list_port_users() {
     if [[ -z "$users" ]]; then
         echo -e "$red 此端口没有配置任何用户 $none"
         pause
-        manage_port_users "$port"  # 返回用户管理菜单
-        return
+        return  # 直接返回，不再调用 manage_port_users
     fi
     
     echo -e "${cyan}序号   UUID    邮箱${none}"
@@ -1549,7 +1549,7 @@ list_port_users() {
     
     echo "----------------------------------------------------------------"
     pause
-    manage_port_users "$port"  # 返回用户管理菜单
+    return  # 直接返回，不再调用 manage_port_users
 }
 
 # 添加新用户
@@ -1736,7 +1736,7 @@ add_port_user() {
     echo "链接信息已保存到 $HOME/vless_reality_${port}_${email}.txt"
     
     pause
-    manage_port_users "$port"  # 返回用户管理菜单
+    return
 }
 
 # 删除用户
@@ -2062,7 +2062,7 @@ modify_port_user_uuid() {
     echo "链接信息已保存到 $HOME/vless_reality_${port}_${email}.txt"
     
     pause
-    manage_port_users "$port"  # 返回用户管理菜单
+    return
 }
 
 # 修改端口的UUID
