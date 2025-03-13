@@ -1611,10 +1611,14 @@ add_port_user() {
         break
     done
     
+    # 生成随机邮箱
+    local random_suffix=$(date +%s%N | md5sum | head -c 8)
+    local default_email="user_${random_suffix}@example.com"
+    
     # 输入邮箱
     echo -e "请输入用户邮箱（用于标识，可选）"
-    read -p "$(echo -e "(默认: ${cyan}user@example.com${none}): ")" email
-    [ -z "$email" ] && email="user@example.com"
+    read -p "$(echo -e "(默认: ${cyan}${default_email}${none}): ")" email
+    [ -z "$email" ] && email="$default_email"
     
     echo
     echo -e "$yellow 邮箱 = ${cyan}$email${none}"
