@@ -1436,82 +1436,92 @@ modify_port_configuration() {
 # 用户管理功能
 manage_port_users() {
     local port=$1
-    local port_info=$(get_port_info "$port")
     
-    echo
-    echo -e "$yellow 用户管理 - 端口 $port $none"
-    echo "----------------------------------------------------------------"
-    
-    # 检查是否有用户数组，如果没有则初始化
-    if ! echo "$port_info" | jq -e 'has("users")' > /dev/null; then
-        # 兼容旧配置，将原UUID转移到users数组中
-        local uuid=$(echo "$port_info" | jq -r '.uuid')
-        if [[ -n "$uuid" ]]; then
-            # 生成随机邮箱
-            local random_suffix=$(date +%s%N | md5sum | head -c 8)
-            local default_email="user_${random_suffix}@example.com"
-
-            # 更新配置到新格式
-            port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "'"$default_email"'"}]}')
-            # 将更新后的配置保存
-            jq "(.ports[] | select(.port == $port)) |= $port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
-            if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
-                mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
-                chmod 600 "$PORT_INFO_FILE"
-                log_info "为端口 $port 初始化用户数组"
-            else
-                rm -f "${PORT_INFO_FILE}.tmp"
-                log_error "为端口 $port 初始化用户数组失败: 无效的JSON"
-                return 1
-            fi
-        else
-            log_error "端口 $port 没有有效的UUID，无法初始化用户数组"
-            echo -e "${red}端口 $port 没有有效的UUID，无法管理用户${none}"
+    while true; do
+        clear  # 清理屏幕，避免内容堆积
+        local port_info=$(get_port_info "$port")
+        if [[ $? -ne 0 ]]; then
+            log_error "获取端口 $port 信息失败"
             return 1
         fi
-    fi
-    
-    # 用户管理菜单
-    echo -e "  ${green}1.${none} 查看所有用户"
-    echo -e "  ${green}2.${none} 添加新用户"
-    echo -e "  ${green}3.${none} 删除用户"
-    echo -e "  ${green}4.${none} 修改用户UUID"
-    echo -e "  ${green}5.${none} 返回上一级菜单"
-    echo "----------------------------------------------------------------"
-    
-    read -p "$(echo -e "请选择 [${green}1-5${none}]: ")" user_choice
-    
-    case $user_choice in
-        1)
-            # 查看所有用户
-            list_port_users "$port"
-            ;;
-            
-        2)
-            # 添加新用户
-            add_port_user "$port"
-            ;;
-            
-        3)
-            # 删除用户
-            delete_port_user "$port"
-            ;;
-            
-        4)
-            # 修改用户UUID
-            modify_port_user_uuid "$port"
-            ;;
-            
-        5)
-            return
-            ;;
-            
-        *)
-            error
-            manage_port_users "$port"  # 返回用户管理菜单
-            return
-            ;;
-    esac
+        
+        echo
+        echo -e "$yellow 用户管理 - 端口 $port $none"
+        echo "----------------------------------------------------------------"
+        
+        # 检查是否有用户数组，如果没有则初始化
+        if ! echo "$port_info" | jq -e 'has("users")' > /dev/null; then
+            # 兼容旧配置，将原UUID转移到users数组中
+            local uuid=$(echo "$port_info" | jq -r '.uuid')
+            if [[ -n "$uuid" ]]; then
+                # 生成随机邮箱
+                local random_suffix=$(date +%s%N | md5sum | head -c 8)
+                local default_email="user_${random_suffix}@example.com"
+                
+                # 更新配置到新格式
+                port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "'"$default_email"'"}]}')
+                # 将更新后的配置保存
+                jq "(.ports[] | select(.port == $port)) |= $port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+                if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+                    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+                    chmod 600 "$PORT_INFO_FILE"
+                    log_info "为端口 $port 初始化用户数组"
+                else
+                    rm -f "${PORT_INFO_FILE}.tmp"
+                    log_error "为端口 $port 初始化用户数组失败: 无效的JSON"
+                    return 1
+                fi
+            else
+                log_error "端口 $port 没有有效的UUID，无法初始化用户数组"
+                echo -e "${red}端口 $port 没有有效的UUID，无法管理用户${none}"
+                pause
+                return 1
+            fi
+        fi
+        
+        # 用户管理菜单
+        echo -e "  ${green}1.${none} 查看所有用户"
+        echo -e "  ${green}2.${none} 添加新用户"
+        echo -e "  ${green}3.${none} 删除用户"
+        echo -e "  ${green}4.${none} 修改用户UUID"
+        echo -e "  ${green}5.${none} 返回上一级菜单"
+        echo "----------------------------------------------------------------"
+        
+        read -p "$(echo -e "请选择 [${green}1-5${none}]: ")" user_choice
+        
+        case $user_choice in
+            1)
+                # 查看所有用户 
+                list_port_users "$port"
+                ;;
+                
+            2)
+                # 添加新用户
+                add_port_user "$port"
+                ;;
+                
+            3)
+                # 删除用户
+                delete_port_user "$port"
+                ;;
+                
+            4)
+                # 修改用户UUID
+                modify_port_user_uuid "$port"
+                ;;
+                
+            5)
+                # 返回上一级菜单 - 不要再调用任何函数，直接退出循环
+                clear  # 清理屏幕
+                return 0
+                ;;
+                
+            *)
+                error
+                pause  # 添加暂停，让用户看到错误信息
+                ;;
+        esac
+    done
 }
 
 # 列出端口的所有用户
@@ -1519,6 +1529,7 @@ list_port_users() {
     local port=$1
     local port_info=$(get_port_info "$port")
     
+    clear  # 清理屏幕
     echo
     echo -e "$yellow 端口 $port 的所有用户 $none"
     echo "----------------------------------------------------------------"
@@ -1527,8 +1538,7 @@ list_port_users() {
     if [[ -z "$users" ]]; then
         echo -e "$red 此端口没有配置任何用户 $none"
         pause
-        manage_port_users "$port"  # 返回用户管理菜单
-        return
+        return  # 直接返回，不再调用manage_port_users
     fi
     
     echo -e "${cyan}序号   UUID    邮箱${none}"
@@ -1547,7 +1557,7 @@ list_port_users() {
     
     echo "----------------------------------------------------------------"
     pause
-    manage_port_users "$port"  # 返回用户管理菜单
+    return  # 直接返回，不再调用manage_port_users
 }
 
 # 添加新用户
