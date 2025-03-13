@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.3"
+VERSION="1.3.5"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -2497,10 +2497,10 @@ uninstall_xray() {
     fi
 }
 
-# 显示所有端口的连接信息
+# 显示所有/特定端口的连接信息
 show_all_connections() {
     echo
-    echo -e "$yellow 所有端口的连接信息 $none"
+    echo -e "$yellow 端口连接信息 $none"
     echo "----------------------------------------------------------------"
     
     if [[ ! -s "$PORT_INFO_FILE" ]] || [[ $(jq '.ports | length' "$PORT_INFO_FILE") -eq 0 ]]; then
@@ -2514,28 +2514,218 @@ show_all_connections() {
         return
     fi
     
+    # 端口选择菜单
+    echo -e "请选择要显示的端口:"
+    echo -e "  ${green}0.${none} 显示所有端口"
+    
+    local port_list=()
+    local index=1
+    
+    # 构建端口选择列表
     jq -c '.ports[]' "$PORT_INFO_FILE" | while read -r port_info; do
         local port=$(echo "$port_info" | jq -r '.port')
+        echo -e "  ${green}$index.${none} 端口 $port"
+        port_list+=("$port")
+        index=$((index+1))
+    done
+    
+    # 读取端口选择
+    local port_count=${#port_list[@]}
+    read -p "$(echo -e "请选择 [${green}0-$port_count${none}]: ")" port_choice
+    
+    # 默认为0（显示所有端口）
+    [ -z "$port_choice" ] && port_choice=0
+    
+    # 根据网络环境选择IP
+    if [[ -n "$IPv4" ]]; then
+        ip=$IPv4
+        netstack=4
+    elif [[ -n "$IPv6" ]]; then
+        ip=$IPv6
+        netstack=6
+    fi
+    
+    # 处理选择
+    if [[ "$port_choice" == "0" ]]; then
+        # 显示所有端口
+        echo
+        echo -e "$yellow 显示所有端口的连接信息 $none"
+        echo "----------------------------------------------------------------"
+        
+        # 遍历所有端口
+        jq -c '.ports[]' "$PORT_INFO_FILE" | while read -r port_info; do
+            local port=$(echo "$port_info" | jq -r '.port')
+            local uuid=$(echo "$port_info" | jq -r '.uuid')
+            local public_key=$(echo "$port_info" | jq -r '.public_key')
+            local shortid=$(echo "$port_info" | jq -r '.shortid')
+            local domain=$(echo "$port_info" | jq -r '.domain')
+            
+            # 检查是否有多个用户
+            local users=$(echo "$port_info" | jq -c '.users[]')
+            local user_count=$(echo "$port_info" | jq '.users | length')
+            
+            echo
+            echo -e "${yellow}端口 $port 连接信息 (共 $user_count 个用户)${none}"
+            echo "----------------------------------------------------------------"
+            
+            if [[ "$user_count" -gt 0 ]]; then
+                # 显示所有用户的连接信息
+                echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
+                    local user_uuid=$(echo "$user_info" | jq -r '.uuid')
+                    local user_email=$(echo "$user_info" | jq -r '.email')
+                    
+                    echo -e "${cyan}用户: $user_email${none}"
+                    generate_user_connection_info "$port" "$user_uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "$user_email"
+                    echo "----------------------------------------------------------------"
+                done
+            else
+                # 使用端口的主UUID（兼容旧配置）
+                generate_user_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "默认用户"
+                echo "----------------------------------------------------------------"
+            fi
+        done
+    elif [[ "$port_choice" =~ ^[0-9]+$ ]] && [[ "$port_choice" -ge 1 ]] && [[ "$port_choice" -le "$port_count" ]]; then
+        # 显示特定端口
+        local selected_port=${port_list[$((port_choice-1))]}
+        local port_info=$(jq -c ".ports[] | select(.port == $selected_port)" "$PORT_INFO_FILE")
         local uuid=$(echo "$port_info" | jq -r '.uuid')
         local public_key=$(echo "$port_info" | jq -r '.public_key')
         local shortid=$(echo "$port_info" | jq -r '.shortid')
         local domain=$(echo "$port_info" | jq -r '.domain')
         
-        # 根据当前网络环境选择IP
-        if [[ -n "$IPv4" ]]; then
-            ip=$IPv4
-            netstack=4
-        elif [[ -n "$IPv6" ]]; then
-            ip=$IPv6
-            netstack=6
-        fi
+        # 检查是否有多个用户
+        local users=$(echo "$port_info" | jq -c '.users[]')
+        local user_count=$(echo "$port_info" | jq '.users | length')
         
-        generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
-    done
+        echo
+        echo -e "${yellow}端口 $selected_port 连接信息 (共 $user_count 个用户)${none}"
+        echo "----------------------------------------------------------------"
+        
+        # 如果只有一个用户，直接显示
+        if [[ "$user_count" -eq 1 ]]; then
+            local single_user=$(echo "$port_info" | jq -c '.users[0]')
+            local user_uuid=$(echo "$single_user" | jq -r '.uuid')
+            local user_email=$(echo "$single_user" | jq -r '.email')
+            
+            echo -e "${cyan}用户: $user_email${none}"
+            generate_user_connection_info "$selected_port" "$user_uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "$user_email"
+        elif [[ "$user_count" -gt 1 ]]; then
+            # 显示用户选择菜单
+            echo -e "请选择要显示的用户:"
+            echo -e "  ${green}0.${none} 显示所有用户"
+            
+            local user_index=1
+            echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
+                local user_uuid=$(echo "$user_info" | jq -r '.uuid')
+                local user_email=$(echo "$user_info" | jq -r '.email')
+                # 截取UUID的开头和结尾部分，中间用省略号
+                local uuid_short="${user_uuid:0:8}...${user_uuid:24}"
+                
+                echo -e "  ${green}$user_index.${none} $user_email (UUID: $uuid_short)"
+                user_index=$((user_index+1))
+            done
+            
+            # 读取用户选择
+            read -p "$(echo -e "请选择 [${green}0-$user_count${none}]: ")" user_choice
+            
+            # 默认为0（显示所有用户）
+            [ -z "$user_choice" ] && user_choice=0
+            
+            echo
+            # 处理用户选择
+            if [[ "$user_choice" == "0" ]]; then
+                # 显示所有用户
+                echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
+                    local user_uuid=$(echo "$user_info" | jq -r '.uuid')
+                    local user_email=$(echo "$user_info" | jq -r '.email')
+                    
+                    echo -e "${cyan}用户: $user_email${none}"
+                    generate_user_connection_info "$selected_port" "$user_uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "$user_email"
+                    echo "----------------------------------------------------------------"
+                done
+            elif [[ "$user_choice" =~ ^[0-9]+$ ]] && [[ "$user_choice" -ge 1 ]] && [[ "$user_choice" -le "$user_count" ]]; then
+                # 显示特定用户
+                local selected_user=$(echo "$port_info" | jq -c ".users[$(($user_choice-1))]")
+                local user_uuid=$(echo "$selected_user" | jq -r '.uuid')
+                local user_email=$(echo "$selected_user" | jq -r '.email')
+                
+                echo -e "${cyan}用户: $user_email${none}"
+                generate_user_connection_info "$selected_port" "$user_uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "$user_email"
+            else
+                error
+            fi
+        else
+            # 使用端口的主UUID（兼容旧配置）
+            generate_user_connection_info "$selected_port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "默认用户"
+        fi
+    else
+        error
+    fi
     
     pause
 }
 
+# 为单个用户生成连接信息
+generate_user_connection_info() {
+    local port=$1
+    local uuid=$2
+    local public_key=$3
+    local shortid=$4
+    local domain=$5
+    local ip=$6
+    local netstack=$7
+    local email=$8
+    
+    echo
+    echo "---------- 端口 $port 的 Xray 配置信息 -------------"
+    echo -e "$green ---提示..这是 VLESS Reality 服务器配置--- $none"
+    echo -e "$yellow 地址 (Address) = $cyan${ip}$none"
+    echo -e "$yellow 端口 (Port) = ${cyan}${port}${none}"
+    echo -e "$yellow 用户ID (User ID / UUID) = $cyan${uuid}$none"
+    echo -e "$yellow 流控 (Flow) = ${cyan}xtls-rprx-vision${none}"
+    echo -e "$yellow 加密 (Encryption) = ${cyan}none${none}"
+    echo -e "$yellow 传输协议 (Network) = ${cyan}tcp$none"
+    echo -e "$yellow 伪装类型 (header type) = ${cyan}none$none"
+    echo -e "$yellow 底层传输安全 (TLS) = ${cyan}reality$none"
+    echo -e "$yellow SNI = ${cyan}${domain}$none"
+    echo -e "$yellow 指纹 (Fingerprint) = ${cyan}random${none}"
+    echo -e "$yellow 公钥 (PublicKey) = ${cyan}${public_key}$none"
+    echo -e "$yellow ShortId = ${cyan}${shortid}$none"
+    echo -e "$yellow SpiderX = ${cyan}${none}"
+    
+    # 检查是否配置了SOCKS5代理
+    local port_info=$(get_port_info "$port")
+    if [[ -n "$port_info" ]]; then
+        local socks5_enabled=$(echo "$port_info" | jq -r '.socks5.enabled // false')
+        if [[ "$socks5_enabled" == "true" ]]; then
+            local socks5_address=$(echo "$port_info" | jq -r '.socks5.address')
+            local socks5_port=$(echo "$port_info" | jq -r '.socks5.port')
+            echo -e "$yellow SOCKS5代理 = ${cyan}已启用 (${socks5_address}:${socks5_port})$none"
+        fi
+    fi
+    
+    # 生成链接
+    if [[ $netstack = "6" ]]; then
+        ip="[$ip]"
+    fi
+    
+    # 使用邮箱标识用户连接
+    local email_tag=""
+    if [[ -n "$email" && "$email" != "默认用户" ]]; then
+        email_tag="_${email}"
+    fi
+    
+    vless_reality_url="vless://${uuid}@${ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=random&pbk=${public_key}&sid=${shortid}&#VLESS_R_${port}${email_tag}"
+    
+    echo
+    echo "---------- VLESS Reality URL ----------"
+    echo -e "${cyan}${vless_reality_url}${none}"
+    echo
+    
+    # 生成二维码
+    echo "二维码:"
+    qrencode -t UTF8 "$vless_reality_url"
+}
 
 
 # 格式化字节大小
