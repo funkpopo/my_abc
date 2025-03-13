@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.6"
+VERSION="1.2.9"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -324,6 +324,12 @@ save_port_info() {
     local shortid=$5
     local domain=$6
     
+    # 检查参数是否为空
+    if [[ -z "$port" || -z "$uuid" || -z "$private_key" || -z "$public_key" || -z "$shortid" || -z "$domain" ]]; then
+        log_error "保存端口配置失败: 参数不完整"
+        return 1
+    fi
+
     # 检查端口是否已存在，如果存在则更新配置
     if jq -e ".ports[] | select(.port == $port)" "$PORT_INFO_FILE" > /dev/null; then
         # 更新已存在的端口配置
@@ -334,7 +340,8 @@ save_port_info() {
             \"public_key\": \"$public_key\",
             \"shortid\": \"$shortid\",
             \"domain\": \"$domain\",
-            \"socks5\": (.socks5 // null)
+            \"socks5\": (.socks5 // null),
+            \"users\": (.users // [{\"uuid\": \"$uuid\", \"email\": \"default@user.com\"}])
         }" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
     else
         # 添加新的端口配置
@@ -345,13 +352,22 @@ save_port_info() {
             \"public_key\": \"$public_key\",
             \"shortid\": \"$shortid\",
             \"domain\": \"$domain\",
-            \"socks5\": null
+            \"socks5\": null,
+            \"users\": [{\"uuid\": \"$uuid\", \"email\": \"default@user.com\"}]
         }]" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
     fi
     
-    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
-    chmod 600 "$PORT_INFO_FILE"
-    log_info "保存端口 $port 配置"
+    # 验证更新后的JSON是否有效
+    if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"
+        log_info "保存端口 $port 配置成功"
+        return 0
+    else
+        rm -f "${PORT_INFO_FILE}.tmp"
+        log_error "保存端口 $port 配置失败: 无效的JSON"
+        return 1
+    fi
 }
 
 # 设置端口的SOCKS5代理配置
@@ -365,6 +381,12 @@ set_port_socks5_config() {
     local socks5_pass=$7
     local udp_over_tcp=$8
     
+    # 检查端口是否存在
+    if ! jq -e ".ports[] | select(.port == $port)" "$PORT_INFO_FILE" > /dev/null; then
+        log_error "设置SOCKS5配置失败: 端口 $port 不存在"
+        return 1
+    fi
+
     # 创建SOCKS5配置对象
     local socks5_config
     if [[ "$enabled" == "y" ]]; then
@@ -383,15 +405,37 @@ set_port_socks5_config() {
     
     # 更新端口的SOCKS5配置
     jq "(.ports[] | select(.port == $port)) |= (.socks5 = $socks5_config)" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
-    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
-    chmod 600 "$PORT_INFO_FILE"
-    log_info "设置端口 $port 的SOCKS5代理配置: 启用=$enabled"
+    
+    # 验证更新后的JSON是否有效
+    if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"
+        log_info "设置端口 $port 的SOCKS5代理配置: 启用=$enabled"
+        return 0
+    else
+        rm -f "${PORT_INFO_FILE}.tmp"
+        log_error "设置端口 $port 的SOCKS5代理配置失败: 无效的JSON"
+        return 1
+    fi
 }
 
 # 获取特定端口的配置信息
 get_port_info() {
     local port=$1
-    jq -c ".ports[] | select(.port == $port)" "$PORT_INFO_FILE"
+    
+    if [[ -z "$port" ]]; then
+        log_error "获取端口信息失败: 端口参数为空"
+        return 1
+    fi
+    
+    local info=$(jq -c ".ports[] | select(.port == $port)" "$PORT_INFO_FILE")
+    if [[ -z "$info" ]]; then
+        log_error "获取端口信息失败: 端口 $port 不存在"
+        return 1
+    fi
+    
+    echo "$info"
+    return 0
 }
 
 # 检查端口是否已配置
@@ -406,10 +450,31 @@ check_port_exists() {
 # 删除特定端口的配置信息
 delete_port_info() {
     local port=$1
+    
+    # 检查端口是否存在
+    if ! check_port_exists "$port"; then
+        log_error "删除端口配置失败: 端口 $port 不存在"
+        return 1
+    fi
+    
+    # 备份原配置
+    cp "$PORT_INFO_FILE" "${PORT_INFO_FILE}.bak"
+    
     jq "del(.ports[] | select(.port == $port))" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
-    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
-    chmod 600 "$PORT_INFO_FILE"
-    log_info "删除端口 $port 配置"
+    
+    # 验证更新后的JSON是否有效
+    if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"
+        log_info "删除端口 $port 配置成功"
+        return 0
+    else
+        rm -f "${PORT_INFO_FILE}.tmp"
+        log_error "删除端口 $port 配置失败: 无效的JSON"
+        # 恢复备份
+        mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+        return 1
+    fi
 }
 
 # 更新Xray配置文件
@@ -477,22 +542,53 @@ EOL
     
     # 添加每个端口的入站配置
     echo "$ports_config" | while read -r port_info; do
+        if [[ -z "$port_info" ]]; then
+            log_error "端口配置为空，跳过"
+            continue
+        fi
+        
+        # 提取信息
         local port=$(echo "$port_info" | jq -r '.port')
         local uuid=$(echo "$port_info" | jq -r '.uuid')
         local private_key=$(echo "$port_info" | jq -r '.private_key')
         local shortid=$(echo "$port_info" | jq -r '.shortid')
         local domain=$(echo "$port_info" | jq -r '.domain')
         
-# 更新配置文件部分修改
-# 在创建入站配置部分的修改:
-
+        # 检查关键数据
+        if [[ -z "$port" || -z "$uuid" || -z "$private_key" || -z "$shortid" || -z "$domain" ]]; then
+            log_error "端口配置数据不完整: port=$port, uuid=$uuid, private_key=$private_key, shortid=$shortid, domain=$domain"
+            continue
+        fi
+        
+        # 处理 clients 数组
+        local users_exist=$(echo "$port_info" | jq 'has("users")')
+        if [[ "$users_exist" != "true" && -n "$uuid" ]]; then
+            # 如果没有 users 数组但有 uuid，创建一个包含 uuid 的用户
+            port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "default@user.com"}]}')
+            log_info "为端口 $port 创建默认用户数组"
+        fi
+        
+        # 生成 clients 数组
+        local clients_json=$(echo "$port_info" | jq -c 'if has("users") and (.users | length > 0) then 
+            [.users[] | {id: .uuid, flow: "xtls-rprx-vision", email: (.email // "user@example.com")}] 
+        else 
+            [{id: .uuid, flow: "xtls-rprx-vision"}] 
+        end')
+        
+        # 确保生成的 JSON 不为空
+        if [[ "$clients_json" == "null" || "$clients_json" == "[]" ]]; then
+            log_error "端口 $port 的客户端配置为空，使用 UUID 创建默认客户端"
+            clients_json="[{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}]"
+        fi
+        
+# 创建入站配置
 cat > "$temp_config.inbound" << EOL
 {
   "listen": "0.0.0.0",
   "port": ${port},
   "protocol": "vless",
   "settings": {
-    "clients": $(echo "$port_info" | jq -c 'if has("users") then [.users[] | {id: .uuid, flow: "xtls-rprx-vision", email: .email}] else [{id: .uuid, flow: "xtls-rprx-vision"}] end'),
+    "clients": ${clients_json},
     "decryption": "none"
   },
   "streamSettings": {
@@ -515,15 +611,25 @@ cat > "$temp_config.inbound" << EOL
 }
 EOL
 
+        # 验证生成的入站配置是否有效
+        if ! jq -e . "$temp_config.inbound" > /dev/null 2>&1; then
+            log_error "端口 $port 生成的JSON配置无效，跳过"
+            cat "$temp_config.inbound" >> "$LOG_FILE"  # 将无效配置写入日志文件以便调试
+            continue
+        fi
 
         # 添加入站配置到主配置
         jq ".inbounds += [$(cat "$temp_config.inbound")]" "$temp_config" > "$temp_config.new"
+        if [[ $? -ne 0 ]]; then
+            log_error "添加入站配置失败: port=$port"
+            continue
+        fi
         mv "$temp_config.new" "$temp_config"
         
         # 处理SOCKS5代理配置
         local socks5_config=$(echo "$port_info" | jq -r '.socks5')
         
-        if [[ "$socks5_config" != "null" && "$(echo "$socks5_config" | jq -r '.enabled')" == "true" ]]; then
+        if [[ "$socks5_config" != "null" && "$(echo "$socks5_config" | jq -r '.enabled // false')" == "true" ]]; then
             local socks5_address=$(echo "$socks5_config" | jq -r '.address')
             local socks5_port=$(echo "$socks5_config" | jq -r '.port')
             local auth_needed=$(echo "$socks5_config" | jq -r '.auth_needed')
@@ -570,8 +676,18 @@ EOL
 }
 EOL
 
+            # 验证生成的SOCKS5出站配置是否有效
+            if ! jq -e . "$temp_config.socks5" > /dev/null 2>&1; then
+                log_error "端口 $port 的SOCKS5出站配置无效，跳过"
+                continue
+            fi
+
             # 添加SOCKS5出站到主配置
             jq ".outbounds += [$(cat "$temp_config.socks5")]" "$temp_config" > "$temp_config.new"
+            if [[ $? -ne 0 ]]; then
+                log_error "添加SOCKS5出站配置失败: port=$port"
+                continue
+            fi
             mv "$temp_config.new" "$temp_config"
             
             # 创建路由规则
@@ -601,10 +717,16 @@ EOL
             # 添加路由规则
             jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
-            
-
         fi
     done
+    
+    # 验证最终配置
+    if ! jq -e . "$temp_config" > /dev/null 2>&1; then
+        log_error "生成的最终配置无效"
+        cat "$temp_config" >> "$LOG_FILE"
+        rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.new" 2>/dev/null
+        return 1
+    fi
     
     # 应用新配置
     cp "$temp_config" "$CONFIG_FILE"
@@ -614,6 +736,7 @@ EOL
     rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.new" 2>/dev/null
 
     log_info "配置文件已更新"
+    return 0
 }
 
 # 检查Xray服务状态
@@ -830,7 +953,7 @@ add_port_configuration() {
         continue
     fi
         
-        # 检查端口是否已被使用
+        # 检查端口是否已被配置
         if check_port_exists "$port"; then
             echo -e "${red}端口 $port 已被配置，请选择其他端口${none}"
             continue
@@ -921,7 +1044,10 @@ add_port_configuration() {
     echo "----------------------------------------------------------------"
     
     # 保存基本端口配置
-    save_port_info "$port" "$uuid" "$private_key" "$public_key" "$shortid" "$domain"
+    if ! save_port_info "$port" "$uuid" "$private_key" "$public_key" "$shortid" "$domain"; then
+        echo -e "${red}保存配置失败，请重试${none}"
+        return 1
+    fi
     
     # SOCKS5 代理设置
     echo
@@ -934,7 +1060,11 @@ add_port_configuration() {
     fi
     
     # 更新配置文件
-    update_config_file
+    echo -e "${yellow}正在更新配置文件...${none}"
+    if ! update_config_file; then
+        echo -e "${red}更新配置文件失败，请检查日志${none}"
+        return 1
+    fi
     
     # 重启 Xray
     echo
@@ -945,6 +1075,8 @@ add_port_configuration() {
     else
         echo -e "$red Xray 服务重启失败，请手动检查! $none"
         log_error "添加端口 $port 后重启 Xray 失败"
+        systemctl status xray
+        return 1
     fi
     
     # 生成连接信息
@@ -997,7 +1129,10 @@ configure_socks5_for_port() {
     fi
     
     # 设置SOCKS5代理配置
-    set_port_socks5_config "$port" "y" "$socks5_address" "$socks5_port" "$auth_needed" "$socks5_user" "$socks5_pass" "$udp_over_tcp"
+    if ! set_port_socks5_config "$port" "y" "$socks5_address" "$socks5_port" "$auth_needed" "$socks5_user" "$socks5_pass" "$udp_over_tcp"; then
+        echo -e "${red}SOCKS5 代理配置失败${none}"
+        return 1
+    fi
     
     echo -e "${green}SOCKS5 代理配置成功添加到端口 $port${none}"
     log_info "为端口 $port 配置 SOCKS5 代理"
@@ -1151,7 +1286,11 @@ modify_port_configuration() {
     esac
     
     # 更新配置文件
-    update_config_file
+    echo -e "${yellow}正在更新配置文件...${none}"
+    if ! update_config_file; then
+        echo -e "${red}更新配置文件失败，请检查日志${none}"
+        return 1
+    fi
     
     # 重启 Xray
     echo
@@ -1162,6 +1301,8 @@ modify_port_configuration() {
     else
         echo -e "$red Xray 服务重启失败，请手动检查! $none"
         log_error "修改端口 $port 配置后重启 Xray 失败"
+        systemctl status xray
+        return 1
     fi
     
     # 为修改后的端口生成新的连接信息
@@ -1186,17 +1327,29 @@ manage_port_users() {
     echo "----------------------------------------------------------------"
     
     # 检查是否有用户数组，如果没有则初始化
-    if ! echo "$port_info" | jq -e '.users' > /dev/null; then
+    if ! echo "$port_info" | jq -e 'has("users")' > /dev/null; then
         # 兼容旧配置，将原UUID转移到users数组中
         local uuid=$(echo "$port_info" | jq -r '.uuid')
-        # 更新配置到新格式
-        port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "default@user.com"}]}')
-        # 将更新后的配置保存
-        jq "(.ports[] | select(.port == $port)) |= $port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
-        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
-        chmod 600 "$PORT_INFO_FILE"
-        log_info "为端口 $port 初始化用户数组"
-    fi
+        if [[ -n "$uuid" ]]; then
+            # 更新配置到新格式
+            port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "default@user.com"}]}')
+            # 将更新后的配置保存
+            jq "(.ports[] | select(.port == $port)) |= $port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+            if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+                mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+                chmod 600 "$PORT_INFO_FILE"
+                log_info "为端口 $port 初始化用户数组"
+            else
+                rm -f "${PORT_INFO_FILE}.tmp"
+                log_error "为端口 $port 初始化用户数组失败: 无效的JSON"
+                return 1
+            fi
+        else
+            log_error "端口 $port 没有有效的UUID，无法初始化用户数组"
+            echo -e "${red}端口 $port 没有有效的UUID，无法管理用户${none}"
+            return 1
+        fi
+    }
     
     # 用户管理菜单
     echo -e "  ${green}1.${none} 查看所有用户"
@@ -1280,11 +1433,47 @@ list_port_users() {
 # 添加新用户
 add_port_user() {
     local port=$1
+    
+    log_info "开始为端口 $port 添加新用户"
+    
     local port_info=$(get_port_info "$port")
+    if [[ $? -ne 0 ]]; then
+        log_error "获取端口 $port 信息失败"
+        return 1
+    fi
+    
+    echo -e "${yellow}正在处理端口信息...${none}"
+    echo "端口信息: $(echo "$port_info" | jq -c .)"
     
     echo
     echo -e "$yellow 添加新用户 - 端口 $port $none"
     echo "----------------------------------------------------------------"
+    
+    # 检查是否有用户数组，如果没有则初始化
+    if ! echo "$port_info" | jq -e 'has("users")' > /dev/null; then
+        # 兼容旧配置，将原UUID转移到users数组中
+        local uuid=$(echo "$port_info" | jq -r '.uuid // ""')
+        if [[ -n "$uuid" ]]; then
+            # 更新配置到新格式
+            port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "default@user.com"}]}')
+            # 将更新后的配置保存
+            jq "(.ports[] | select(.port == $port)) |= $port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+            if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+                mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+                chmod 600 "$PORT_INFO_FILE"
+                log_info "为端口 $port 初始化用户数组"
+                # 重新获取更新后的信息
+                port_info=$(get_port_info "$port")
+            else
+                rm -f "${PORT_INFO_FILE}.tmp"
+                log_error "为端口 $port 初始化用户数组失败: 无效的JSON"
+                return 1
+            fi
+        else
+            log_error "端口 $port 没有有效的UUID，无法初始化用户数组"
+            return 1
+        fi
+    fi
     
     # 生成随机UUID
     local ip=$([ "$netstack" = "6" ] && echo "$IPv6" || echo "$IPv4")
@@ -1323,19 +1512,67 @@ add_port_user() {
     echo -e "$yellow 邮箱 = ${cyan}$email${none}"
     
     # 添加新用户
-    local updated_port_info=$(echo "$port_info" | jq '.users += [{uuid: "'$uuid'", email: "'$email'"}]')
+    echo "正在添加新用户..."
+    echo "UUID: $uuid"
+    echo "Email: $email"
+
+    # 检查UUID是否有效
+    if [[ ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        log_error "无效的UUID格式: $uuid"
+        return 1
+    fi
+
+    # 备份当前配置
+    cp "$PORT_INFO_FILE" "${PORT_INFO_FILE}.bak"
+
+    # 安全地更新端口配置
+    jq_query=".ports[] | select(.port == $port)"
+    current_users=$(jq -c "$jq_query | .users" "$PORT_INFO_FILE")
+
+    if [[ "$current_users" == "null" || "$current_users" == "" ]]; then
+        # 如果users字段不存在或为空，创建新的users数组
+        jq "(.ports[] | select(.port == $port)) |= (. + {users: [{uuid: \"$uuid\", email: \"$email\"}]})" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+    else
+        # 向现有users数组添加新用户
+        jq "(.ports[] | select(.port == $port)) |= (.users += [{uuid: \"$uuid\", email: \"$email\"}])" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+    fi
+
+    # 验证更新后的JSON是否有效
+    if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"
+        success "用户添加成功!"
+        log_info "为端口 $port 添加新用户 UUID: $uuid, 邮箱: $email"
+    else
+        rm -f "${PORT_INFO_FILE}.tmp"
+        log_error "生成的配置无效，用户添加失败"
+        # 恢复备份
+        mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+        return 1
+    fi
     
-    # 保存更新后的配置
-    jq "(.ports[] | select(.port == $port)) |= $updated_port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
-    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
-    chmod 600 "$PORT_INFO_FILE"
-    
-    success "用户添加成功!"
-    log_info "为端口 $port 添加新用户 UUID: $uuid, 邮箱: $email"
-    
-    # 更新配置文件并重启服务
-    update_config_file
-    systemctl restart xray
+    # 更新配置文件
+    echo "更新配置文件..."
+    if ! update_config_file; then
+        log_error "配置文件更新失败"
+        # 恢复备份
+        mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+        return 1
+    fi
+
+    # 重启服务
+    echo "重启Xray服务..."
+    if ! systemctl restart xray; then
+        log_error "Xray服务重启失败，请手动检查"
+        systemctl status xray
+        # 恢复备份
+        mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+        update_config_file
+        systemctl restart xray
+        return 1
+    fi
+
+    log_info "Xray服务已重启"
     
     # 生成连接信息
     local domain=$(echo "$port_info" | jq -r '.domain')
@@ -1441,20 +1678,48 @@ delete_port_user() {
     read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" confirm_delete
     
     if [[ "$confirm_delete" == "y" ]]; then
+        # 备份当前配置
+        cp "$PORT_INFO_FILE" "${PORT_INFO_FILE}.bak"
+        
         # 删除用户
         local updated_port_info=$(echo "$port_info" | jq "del(.users[$(($user_index-1))])")
         
         # 保存更新后的配置
         jq "(.ports[] | select(.port == $port)) |= $updated_port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
-        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
-        chmod 600 "$PORT_INFO_FILE"
         
-        success "用户删除成功!"
-        log_info "从端口 $port 删除用户 UUID: $uuid_to_delete, 邮箱: $email_to_delete"
-        
-        # 更新配置文件并重启服务
-        update_config_file
-        systemctl restart xray
+        # 验证更新后的JSON是否有效
+        if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+            mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+            chmod 600 "$PORT_INFO_FILE"
+            success "用户删除成功!"
+            log_info "从端口 $port 删除用户 UUID: $uuid_to_delete, 邮箱: $email_to_delete"
+            
+            # 更新配置文件并重启服务
+            if ! update_config_file; then
+                log_error "更新配置文件失败，尝试恢复备份"
+                mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+                update_config_file
+                systemctl restart xray
+                pause
+                manage_port_users "$port"
+                return
+            fi
+            
+            if ! systemctl restart xray; then
+                log_error "重启Xray服务失败，尝试恢复备份"
+                mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+                update_config_file
+                systemctl restart xray
+                pause
+                manage_port_users "$port"
+                return
+            fi
+        else
+            rm -f "${PORT_INFO_FILE}.tmp"
+            log_error "生成的JSON配置无效，用户删除失败"
+            # 恢复备份
+            mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+        fi
     else
         echo -e "$yellow 操作已取消 $none"
     fi
@@ -1558,20 +1823,51 @@ modify_port_user_uuid() {
         break
     done
     
+    # 备份当前配置
+    cp "$PORT_INFO_FILE" "${PORT_INFO_FILE}.bak"
+    
     # 修改用户UUID
     local updated_port_info=$(echo "$port_info" | jq ".users[$(($user_index-1))].uuid = \"$new_uuid\"")
     
     # 保存更新后的配置
     jq "(.ports[] | select(.port == $port)) |= $updated_port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
-    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
-    chmod 600 "$PORT_INFO_FILE"
     
-    success "用户UUID修改成功!"
-    log_info "修改端口 $port 用户UUID: $old_uuid -> $new_uuid, 邮箱: $email"
-    
-    # 更新配置文件并重启服务
-    update_config_file
-    systemctl restart xray
+    # 验证更新后的JSON是否有效
+    if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
+        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"
+        success "用户UUID修改成功!"
+        log_info "修改端口 $port 用户UUID: $old_uuid -> $new_uuid, 邮箱: $email"
+        
+        # 更新配置文件并重启服务
+        if ! update_config_file; then
+            log_error "更新配置文件失败，尝试恢复备份"
+            mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+            update_config_file
+            systemctl restart xray
+            pause
+            manage_port_users "$port"
+            return
+        fi
+        
+        if ! systemctl restart xray; then
+            log_error "重启Xray服务失败，尝试恢复备份"
+            mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+            update_config_file
+            systemctl restart xray
+            pause
+            manage_port_users "$port"
+            return
+        fi
+    else
+        rm -f "${PORT_INFO_FILE}.tmp"
+        log_error "生成的JSON配置无效，UUID修改失败"
+        # 恢复备份
+        mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+        pause
+        manage_port_users "$port"
+        return
+    fi
     
     # 生成连接信息
     local domain=$(echo "$port_info" | jq -r '.domain')
@@ -1653,14 +1949,22 @@ modify_port_uuid() {
         
         echo
         echo -e "$yellow 新UUID = ${cyan}$new_uuid${none}"
-        echo -e "$yellow 新私钥 = ${cyan}$private_key${none}"
-        echo -e "$yellow 新公钥 = ${cyan}$public_key${none}"
+        echo -e "$yellow 新私钥 = ${cyan}$new_private_key${none}"
+        echo -e "$yellow 新公钥 = ${cyan}$new_public_key${none}"
         echo -e "$yellow 新ShortID = ${cyan}$new_shortid${none}"
         echo
         
+        # 备份当前配置
+        cp "$PORT_INFO_FILE" "${PORT_INFO_FILE}.bak"
+        
         # 保存修改
         local domain=$(echo "$port_info" | jq -r '.domain')
-        save_port_info "$port" "$new_uuid" "$new_private_key" "$new_public_key" "$new_shortid" "$domain"
+        if ! save_port_info "$port" "$new_uuid" "$new_private_key" "$new_public_key" "$new_shortid" "$domain"; then
+            log_error "保存端口配置失败"
+            # 恢复备份
+            mv "${PORT_INFO_FILE}.bak" "$PORT_INFO_FILE"
+            return 1
+        fi
         
         # 保持SOCKS5配置不变
         local socks5_config=$(echo "$port_info" | jq -r '.socks5')
