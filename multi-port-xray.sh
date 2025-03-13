@@ -1349,7 +1349,7 @@ manage_port_users() {
             echo -e "${red}端口 $port 没有有效的UUID，无法管理用户${none}"
             return 1
         fi
-    }
+    fi
     
     # 用户管理菜单
     echo -e "  ${green}1.${none} 查看所有用户"
