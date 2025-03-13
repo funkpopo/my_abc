@@ -482,6 +482,8 @@ update_config_file() {
     # 备份当前配置
     if [[ -f "$CONFIG_FILE" ]]; then
         cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+        # 创建一个完整备份，用于在更新失败时恢复
+        cp "$CONFIG_FILE" "${CONFIG_FILE}.full.bak"
     fi
     
 # 创建基本配置
@@ -540,8 +542,22 @@ EOL
     local temp_config=$(mktemp)
     cp "$CONFIG_FILE" "$temp_config"
     
-    # 添加每个端口的入站配置
-    echo "$ports_config" | while read -r port_info; do
+    # 创建一个数组存储所有端口配置
+    local ports_array=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && ports_array+=("$line")
+    done <<< "$ports_config"
+    
+    log_info "共找到 ${#ports_array[@]} 个端口配置"
+    
+    # 如果没有找到任何端口配置，返回错误
+    if [[ ${#ports_array[@]} -eq 0 ]]; then
+        log_error "未找到任何端口配置，配置更新失败"
+        return 1
+    fi
+    
+    # 添加每个端口的入站配置 - 使用数组而不是管道
+    for port_info in "${ports_array[@]}"; do
         if [[ -z "$port_info" ]]; then
             log_error "端口配置为空，跳过"
             continue
@@ -591,12 +607,6 @@ EOL
             # 回退到使用端口的主 UUID
             clients_json="[{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}]"
         fi
-
-        # 额外检查JSON格式是否有效
-        if ! echo "$clients_json" | jq -e . >/dev/null 2>&1; then
-            log_error "生成的clients_json无效: $clients_json"
-            clients_json="[{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}]"
-        fi
         
 # 创建入站配置
 cat > "$temp_config.inbound" << EOL
@@ -641,46 +651,42 @@ EOL
             echo "domain = $domain" >> "$LOG_FILE"
             echo "shortid = $shortid" >> "$LOG_FILE"
             
-            # 尽管配置可能有问题，但我们不想跳过这个端口，
-            # 因为这可能会导致现有端口突然不可用。
-            # 相反，让我们尝试识别并修复特定问题
-            
-            # 1. 检查 clients_json 中是否存在引号不匹配问题
+            # 尝试修复JSON格式问题
             clients_json=$(echo "$clients_json" | sed 's/\\"/"/g' | sed 's/"/\\"/g')
             
             # 2. 重新生成入站配置
             cat > "$temp_config.inbound" << EOL
-        {
-        "listen": "0.0.0.0",
-        "port": ${port},
-        "protocol": "vless",
-        "settings": {
-            "clients": ${clients_json},
-            "decryption": "none"
-        },
-        "streamSettings": {
-            "network": "tcp",
-            "security": "reality",
-            "realitySettings": {
-            "show": false,
-            "dest": "${domain}:443",
-            "xver": 0,
-            "serverNames": ["${domain}"],
-            "privateKey": "${private_key}",
-            "shortIds": ["${shortid}"]
-            }
-        },
-        "sniffing": {
-            "enabled": true,
-            "destOverride": ["http", "tls", "quic"]
-        },
-        "tag": "inbound-${port}"
-        }
-        EOL
+{
+  "listen": "0.0.0.0",
+  "port": ${port},
+  "protocol": "vless",
+  "settings": {
+    "clients": ${clients_json},
+    "decryption": "none"
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": "${domain}:443",
+      "xver": 0,
+      "serverNames": ["${domain}"],
+      "privateKey": "${private_key}",
+      "shortIds": ["${shortid}"]
+    }
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls", "quic"]
+  },
+  "tag": "inbound-${port}"
+}
+EOL
             
             # 再次检查修复后的配置
             if ! jq -e . "$temp_config.inbound" > /dev/null 2>&1; then
-                log_error "修复后的配置仍然无效，只能跳过端口 $port"
+                log_error "修复后的配置仍然无效，跳过端口 $port"
                 log_error "请考虑删除该端口配置并重新添加"
                 continue
             fi
@@ -795,6 +801,30 @@ EOL
         log_error "生成的最终配置无效"
         cat "$temp_config" >> "$LOG_FILE"
         rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.new" 2>/dev/null
+        
+        # 恢复完整备份
+        if [[ -f "${CONFIG_FILE}.full.bak" ]]; then
+            log_info "恢复完整备份配置"
+            cp "${CONFIG_FILE}.full.bak" "$CONFIG_FILE"
+            chmod 644 "$CONFIG_FILE"
+        fi
+        
+        return 1
+    fi
+    
+    # 检查是否至少有一个入站配置
+    local inbound_count=$(jq '.inbounds | length' "$temp_config")
+    if [[ "$inbound_count" -eq 0 ]]; then
+        log_error "更新后的配置没有任何入站配置，更新失败"
+        
+        # 恢复完整备份
+        if [[ -f "${CONFIG_FILE}.full.bak" ]]; then
+            log_info "恢复完整备份配置"
+            cp "${CONFIG_FILE}.full.bak" "$CONFIG_FILE"
+            chmod 644 "$CONFIG_FILE"
+        fi
+        
+        rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.new" 2>/dev/null
         return 1
     fi
     
@@ -802,8 +832,11 @@ EOL
     cp "$temp_config" "$CONFIG_FILE"
     chmod 644 "$CONFIG_FILE"
     
+    # 记录配置更新后的入站数量
+    log_info "配置更新完成，共添加 $inbound_count 个入站配置"
+    
     # 清理临时文件
-    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.new" 2>/dev/null
+    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.new" "${CONFIG_FILE}.full.bak" 2>/dev/null
 
     log_info "配置文件已更新"
     return 0
@@ -1779,6 +1812,37 @@ delete_port_user() {
             success "用户删除成功!"
             log_info "从端口 $port 删除用户 UUID: $uuid_to_delete, 邮箱: $email_to_delete"
             
+            # 删除与此用户相关的连接信息文件
+            echo -e "$yellow 删除用户连接信息文件... $none"
+            # 处理email可能含有特殊字符的情况
+            local sanitized_email=$(echo "$email_to_delete" | sed 's/[^a-zA-Z0-9@._-]/_/g')
+            
+            # 尝试按照多种可能的模式匹配用户文件
+            local user_files_count=0
+            
+            # 1. 尝试通过端口+email匹配
+            if ls $HOME/vless_reality_${port}_${sanitized_email}.txt 1>/dev/null 2>&1; then
+                rm -f $HOME/vless_reality_${port}_${sanitized_email}.txt
+                user_files_count=$((user_files_count+1))
+                log_info "删除了用户文件 vless_reality_${port}_${sanitized_email}.txt"
+            fi
+            
+            # 2. 尝试UUID匹配（更通用的方法）
+            for file in $HOME/vless_reality_*.txt; do
+                if [[ -f "$file" ]] && grep -q "$uuid_to_delete" "$file"; then
+                    rm -f "$file"
+                    user_files_count=$((user_files_count+1))
+                    log_info "删除了包含UUID的文件 $(basename "$file")"
+                fi
+            done
+            
+            if [[ $user_files_count -gt 0 ]]; then
+                echo -e "$green 成功删除 $user_files_count 个用户连接信息文件 $none"
+            else
+                echo -e "$yellow 未找到与此用户相关的连接信息文件 $none"
+                log_info "未找到与用户 $email_to_delete ($uuid_to_delete) 相关的连接信息文件"
+            fi
+            
             # 更新配置文件并重启服务
             if ! update_config_file; then
                 log_error "更新配置文件失败，尝试恢复备份"
@@ -2319,6 +2383,22 @@ delete_port_configuration() {
             
             # 更新配置文件
             update_config_file
+            
+            # 删除此端口生成的所有txt文件
+            echo -e "$yellow 删除端口 ${cyan}$port${none} 生成的所有连接信息文件... $none"
+            
+            # 匹配所有包含端口号的连接信息文件
+            local files_to_delete=($HOME/vless_reality_${port}*.txt)
+            
+            # 检查找到的文件数量
+            if [[ ${#files_to_delete[@]} -gt 0 && -f "${files_to_delete[0]}" ]]; then
+                rm -f $HOME/vless_reality_${port}*.txt
+                log_info "删除了端口 $port 生成的 ${#files_to_delete[@]} 个连接信息文件"
+                echo -e "$green 成功删除 ${#files_to_delete[@]} 个连接信息文件 $none"
+            else
+                log_info "未找到端口 $port 生成的连接信息文件"
+                echo -e "$yellow 未找到端口 ${cyan}$port${none} 生成的连接信息文件 $none"
+            fi
             
             # 重启 Xray
             echo
