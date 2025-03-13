@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.1"
+VERSION="1.3.0"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -315,7 +315,7 @@ check_dependencies() {
     return 0
 }
 
-# 保存端口配置信息到JSON文件
+# 修改 save_port_info() 函数使默认用户也使用随机邮箱
 save_port_info() {
     local port=$1
     local uuid=$2
@@ -330,6 +330,10 @@ save_port_info() {
         return 1
     fi
 
+    # 生成随机邮箱
+    local random_suffix=$(date +%s%N | md5sum | head -c 8)
+    local default_email="user_${random_suffix}@example.com"
+
     # 检查端口是否已存在，如果存在则更新配置
     if jq -e ".ports[] | select(.port == $port)" "$PORT_INFO_FILE" > /dev/null; then
         # 更新已存在的端口配置
@@ -341,7 +345,7 @@ save_port_info() {
             \"shortid\": \"$shortid\",
             \"domain\": \"$domain\",
             \"socks5\": (.socks5 // null),
-            \"users\": (.users // [{\"uuid\": \"$uuid\", \"email\": \"default@user.com\"}])
+            \"users\": (.users // [{\"uuid\": \"$uuid\", \"email\": \"$default_email\"}])
         }" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
     else
         # 添加新的端口配置
@@ -353,7 +357,7 @@ save_port_info() {
             \"shortid\": \"$shortid\",
             \"domain\": \"$domain\",
             \"socks5\": null,
-            \"users\": [{\"uuid\": \"$uuid\", \"email\": \"default@user.com\"}]
+            \"users\": [{\"uuid\": \"$uuid\", \"email\": \"$default_email\"}]
         }]" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
     fi
     
@@ -579,10 +583,14 @@ EOL
         # 处理 clients 数组
         local users_exist=$(echo "$port_info" | jq 'has("users")')
         if [[ "$users_exist" != "true" && -n "$uuid" ]]; then
+            # 生成随机邮箱
+            local random_suffix=$(date +%s%N | md5sum | head -c 8)
+            local default_email="user_${random_suffix}@example.com"
+
             # 如果没有 users 数组但有 uuid，创建一个包含 uuid 的用户
-            port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "default@user.com"}]}')
+            port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "'"$default_email"'"}]}')
             log_info "为端口 $port 创建默认用户数组"
-        fi
+        }
         
         # 生成 clients 数组，确保 email 字段不会破坏 JSON 格式
         local clients_json=$(echo "$port_info" | jq -c 'if has("users") and (.users | length > 0) then 
@@ -1439,8 +1447,12 @@ manage_port_users() {
         # 兼容旧配置，将原UUID转移到users数组中
         local uuid=$(echo "$port_info" | jq -r '.uuid')
         if [[ -n "$uuid" ]]; then
+            # 生成随机邮箱
+            local random_suffix=$(date +%s%N | md5sum | head -c 8)
+            local default_email="user_${random_suffix}@example.com"
+
             # 更新配置到新格式
-            port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "default@user.com"}]}')
+            port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "'"$default_email"'"}]}')
             # 将更新后的配置保存
             jq "(.ports[] | select(.port == $port)) |= $port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
             if jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null; then
