@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.3"
+VERSION="1.3.0"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -1420,7 +1420,7 @@ modify_port_configuration() {
         systemctl status xray
         return 1
     fi
-    
+
     
     pause
 }
@@ -1503,8 +1503,7 @@ manage_port_users() {
                 ;;
                 
             5)
-                # 返回上一级菜单 - 不要再调用任何函数，直接退出循环
-                clear  # 清理屏幕
+                # 返回上一级菜单 - 不要再调用任何函数，直接退出循环                
                 return 0
                 ;;
                 
@@ -1530,7 +1529,8 @@ list_port_users() {
     if [[ -z "$users" ]]; then
         echo -e "$red 此端口没有配置任何用户 $none"
         pause
-        return  # 直接返回，不再调用manage_port_users
+        manage_port_users "$port"  # 返回用户管理菜单
+        return
     fi
     
     echo -e "${cyan}序号   UUID    邮箱${none}"
@@ -1549,7 +1549,7 @@ list_port_users() {
     
     echo "----------------------------------------------------------------"
     pause
-    return  # 直接返回，不再调用manage_port_users
+    manage_port_users "$port"  # 返回用户管理菜单
 }
 
 # 添加新用户
