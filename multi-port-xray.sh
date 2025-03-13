@@ -590,7 +590,7 @@ EOL
             # 如果没有 users 数组但有 uuid，创建一个包含 uuid 的用户
             port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "'"$default_email"'"}]}')
             log_info "为端口 $port 创建默认用户数组"
-        }
+        fi
         
         # 生成 clients 数组，确保 email 字段不会破坏 JSON 格式
         local clients_json=$(echo "$port_info" | jq -c 'if has("users") and (.users | length > 0) then 
