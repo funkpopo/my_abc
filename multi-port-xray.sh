@@ -1421,14 +1421,6 @@ modify_port_configuration() {
         return 1
     fi
     
-    # 为修改后的端口生成新的连接信息
-    local ip=$([ "$netstack" = "6" ] && echo "$IPv6" || echo "$IPv4")
-    local port_info=$(get_port_info "$port")
-    local uuid=$(echo "$port_info" | jq -r '.uuid')
-    local public_key=$(echo "$port_info" | jq -r '.public_key')
-    local shortid=$(echo "$port_info" | jq -r '.shortid')
-    local domain=$(echo "$port_info" | jq -r '.domain')
-    generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
     
     pause
 }
@@ -2291,11 +2283,13 @@ modify_port_socks5() {
         local socks5_port=$(echo "$socks5_config" | jq -r '.port')
         local auth_needed=$(echo "$socks5_config" | jq -r '.auth_needed')
         local socks5_user=$(echo "$socks5_config" | jq -r '.username')
+        local socks5_pass=$(echo "$socks5_config" | jq -r '.password')
         local udp_over_tcp=$(echo "$socks5_config" | jq -r '.udp_over_tcp')
         
         echo -e "SOCKS5服务器: $cyan$socks5_address:$socks5_port$none"
         if [[ "$auth_needed" == "true" ]]; then
             echo -e "认证: ${green}启用${none} (用户名: $cyan$socks5_user$none)"
+            echo -e "认证: ${green}启用${none} (密码: $cyan$socks5_pass$none)"
         else
             echo -e "认证: ${red}禁用${none}"
         fi
@@ -2331,13 +2325,13 @@ modify_port_socks5() {
             [ -z "$new_auth_needed" ] && new_auth_needed=$([ "$auth_needed" == "true" ] && echo "y" || echo "n")
             
             new_socks5_user=$socks5_user
-            new_socks5_pass=""
+            new_socks5_pass=$socks5_pass
             if [[ "$new_auth_needed" == "y" ]]; then
                 echo -e "请输入用户名 (当前: $cyan$socks5_user$none)"
                 read -p "$(echo -e "(留空保持不变): ")" temp_user
                 [ -n "$temp_user" ] && new_socks5_user=$temp_user
                 
-                echo -e "请输入密码"
+                echo -e "请输入密码 (当前: $cyan$socks5_pass$none)"
                 read -p "$(echo -e "(留空保持不变): ")" temp_pass
                 echo  # 为了换行
                 [ -n "$temp_pass" ] && new_socks5_pass=$temp_pass
