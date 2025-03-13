@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.9"
+VERSION="1.3.0"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -568,16 +568,33 @@ EOL
             log_info "为端口 $port 创建默认用户数组"
         fi
         
-        # 生成 clients 数组
+        # 生成 clients 数组，确保 email 字段不会破坏 JSON 格式
         local clients_json=$(echo "$port_info" | jq -c 'if has("users") and (.users | length > 0) then 
-            [.users[] | {id: .uuid, flow: "xtls-rprx-vision", email: (.email // "user@example.com")}] 
+            [.users[] | {
+                id: .uuid, 
+                flow: "xtls-rprx-vision", 
+                email: (.email | gsub("[^a-zA-Z0-9@._-]"; "") // "user@example.com")
+            }] 
         else 
             [{id: .uuid, flow: "xtls-rprx-vision"}] 
         end')
-        
-        # 确保生成的 JSON 不为空
+
+        # 确保生成的 JSON 不为空且格式正确
         if [[ "$clients_json" == "null" || "$clients_json" == "[]" ]]; then
             log_error "端口 $port 的客户端配置为空，使用 UUID 创建默认客户端"
+            clients_json="[{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}]"
+        fi
+
+        # 额外检查生成的 clients_json 是否为有效的 JSON
+        if ! echo "$clients_json" | jq -e . >/dev/null 2>&1; then
+            log_error "生成的客户端JSON无效: $clients_json"
+            # 回退到使用端口的主 UUID
+            clients_json="[{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}]"
+        fi
+
+        # 额外检查JSON格式是否有效
+        if ! echo "$clients_json" | jq -e . >/dev/null 2>&1; then
+            log_error "生成的clients_json无效: $clients_json"
             clients_json="[{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}]"
         fi
         
@@ -613,9 +630,62 @@ EOL
 
         # 验证生成的入站配置是否有效
         if ! jq -e . "$temp_config.inbound" > /dev/null 2>&1; then
-            log_error "端口 $port 生成的JSON配置无效，跳过"
+            log_error "端口 $port 生成的JSON配置无效"
+            echo "无效的入站配置:" >> "$LOG_FILE"
             cat "$temp_config.inbound" >> "$LOG_FILE"  # 将无效配置写入日志文件以便调试
-            continue
+            
+            # 记录当前使用的参数以便诊断
+            echo "clients_json = $clients_json" >> "$LOG_FILE"
+            echo "uuid = $uuid" >> "$LOG_FILE"
+            echo "private_key = $private_key" >> "$LOG_FILE"
+            echo "domain = $domain" >> "$LOG_FILE"
+            echo "shortid = $shortid" >> "$LOG_FILE"
+            
+            # 尽管配置可能有问题，但我们不想跳过这个端口，
+            # 因为这可能会导致现有端口突然不可用。
+            # 相反，让我们尝试识别并修复特定问题
+            
+            # 1. 检查 clients_json 中是否存在引号不匹配问题
+            clients_json=$(echo "$clients_json" | sed 's/\\"/"/g' | sed 's/"/\\"/g')
+            
+            # 2. 重新生成入站配置
+            cat > "$temp_config.inbound" << EOL
+        {
+        "listen": "0.0.0.0",
+        "port": ${port},
+        "protocol": "vless",
+        "settings": {
+            "clients": ${clients_json},
+            "decryption": "none"
+        },
+        "streamSettings": {
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+            "show": false,
+            "dest": "${domain}:443",
+            "xver": 0,
+            "serverNames": ["${domain}"],
+            "privateKey": "${private_key}",
+            "shortIds": ["${shortid}"]
+            }
+        },
+        "sniffing": {
+            "enabled": true,
+            "destOverride": ["http", "tls", "quic"]
+        },
+        "tag": "inbound-${port}"
+        }
+        EOL
+            
+            # 再次检查修复后的配置
+            if ! jq -e . "$temp_config.inbound" > /dev/null 2>&1; then
+                log_error "修复后的配置仍然无效，只能跳过端口 $port"
+                log_error "请考虑删除该端口配置并重新添加"
+                continue
+            fi
+            
+            log_info "端口 $port 的配置已修复"
         fi
 
         # 添加入站配置到主配置
@@ -867,7 +937,12 @@ restore_configuration() {
     
     # 恢复Xray配置
     if [[ -f "$temp_dir/$(basename "$CONFIG_FILE")" ]]; then
-        cp "$temp_dir/$(basename "$CONFIG_FILE")" "$CONFIG_FILE"
+        if ! cp "$temp_dir/$(basename "$CONFIG_FILE")" "$CONFIG_FILE"; then
+            echo -e "${red}复制配置文件失败${none}"
+            log_error "恢复配置文件失败"
+            rm -rf "$temp_dir"
+            return 1
+        fi
         chmod 644 "$CONFIG_FILE"
     fi
     
@@ -1527,7 +1602,10 @@ add_port_user() {
 
     # 安全地更新端口配置
     jq_query=".ports[] | select(.port == $port)"
-    current_users=$(jq -c "$jq_query | .users" "$PORT_INFO_FILE")
+    current_users=$(jq -c "$jq_query | .users // null" "$PORT_INFO_FILE")
+
+    # 过滤邮箱中可能导致JSON解析问题的字符
+    email=$(echo "$email" | sed 's/[^a-zA-Z0-9@._-]//g')
 
     if [[ "$current_users" == "null" || "$current_users" == "" ]]; then
         # 如果users字段不存在或为空，创建新的users数组
@@ -1535,6 +1613,13 @@ add_port_user() {
     else
         # 向现有users数组添加新用户
         jq "(.ports[] | select(.port == $port)) |= (.users += [{uuid: \"$uuid\", email: \"$email\"}])" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+    fi
+
+    # 验证更新后的JSON是否有效
+    if ! jq -e . "${PORT_INFO_FILE}.tmp" > /dev/null 2>&1; then
+        rm -f "${PORT_INFO_FILE}.tmp"
+        log_error "生成的配置JSON无效，用户添加失败"
+        return 1
     fi
 
     # 验证更新后的JSON是否有效
