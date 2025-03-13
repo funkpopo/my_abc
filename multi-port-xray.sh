@@ -483,19 +483,16 @@ EOL
         local shortid=$(echo "$port_info" | jq -r '.shortid')
         local domain=$(echo "$port_info" | jq -r '.domain')
         
-        # 创建入站配置
+# 更新配置文件部分修改
+# 在创建入站配置部分的修改:
+
 cat > "$temp_config.inbound" << EOL
 {
   "listen": "0.0.0.0",
   "port": ${port},
   "protocol": "vless",
   "settings": {
-    "clients": [
-      {
-        "id": "${uuid}",
-        "flow": "xtls-rprx-vision"
-      }
-    ],
+    "clients": $(echo "$port_info" | jq -c 'if has("users") then [.users[] | {id: .uuid, flow: "xtls-rprx-vision", email: .email}] else [{id: .uuid, flow: "xtls-rprx-vision"}] end'),
     "decryption": "none"
   },
   "streamSettings": {
@@ -517,6 +514,7 @@ cat > "$temp_config.inbound" << EOL
   "tag": "inbound-${port}"
 }
 EOL
+
 
         # 添加入站配置到主配置
         jq ".inbounds += [$(cat "$temp_config.inbound")]" "$temp_config" > "$temp_config.new"
@@ -1110,10 +1108,11 @@ modify_port_configuration() {
     echo -e "  ${green}2.${none} 修改域名(SNI)"
     echo -e "  ${green}3.${none} 修改ShortID"
     echo -e "  ${green}4.${none} 修改SOCKS5代理设置"
-    echo -e "  ${green}5.${none} 返回上一级菜单"
+    echo -e "  ${green}5.${none} 用户管理"
+    echo -e "  ${green}6.${none} 返回上一级菜单"
     echo "----------------------------------------------------------------"
     
-    read -p "$(echo -e "请选择 [${green}1-5${none}]: ")" modify_choice
+    read -p "$(echo -e "请选择 [${green}1-6${none}]: ")" modify_choice
     
     case $modify_choice in
         1)
@@ -1137,6 +1136,11 @@ modify_port_configuration() {
             ;;
             
         5)
+            # 用户管理
+            manage_port_users "$port"
+            ;;
+            
+        6)
             return
             ;;
             
@@ -1170,6 +1174,432 @@ modify_port_configuration() {
     generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
     
     pause
+}
+
+# 用户管理功能
+manage_port_users() {
+    local port=$1
+    local port_info=$(get_port_info "$port")
+    
+    echo
+    echo -e "$yellow 用户管理 - 端口 $port $none"
+    echo "----------------------------------------------------------------"
+    
+    # 检查是否有用户数组，如果没有则初始化
+    if ! echo "$port_info" | jq -e '.users' > /dev/null; then
+        # 兼容旧配置，将原UUID转移到users数组中
+        local uuid=$(echo "$port_info" | jq -r '.uuid')
+        # 更新配置到新格式
+        port_info=$(echo "$port_info" | jq '. + {users: [{uuid: .uuid, email: "default@user.com"}]}')
+        # 将更新后的配置保存
+        jq "(.ports[] | select(.port == $port)) |= $port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"
+        log_info "为端口 $port 初始化用户数组"
+    fi
+    
+    # 用户管理菜单
+    echo -e "  ${green}1.${none} 查看所有用户"
+    echo -e "  ${green}2.${none} 添加新用户"
+    echo -e "  ${green}3.${none} 删除用户"
+    echo -e "  ${green}4.${none} 修改用户UUID"
+    echo -e "  ${green}5.${none} 返回上一级菜单"
+    echo "----------------------------------------------------------------"
+    
+    read -p "$(echo -e "请选择 [${green}1-5${none}]: ")" user_choice
+    
+    case $user_choice in
+        1)
+            # 查看所有用户
+            list_port_users "$port"
+            ;;
+            
+        2)
+            # 添加新用户
+            add_port_user "$port"
+            ;;
+            
+        3)
+            # 删除用户
+            delete_port_user "$port"
+            ;;
+            
+        4)
+            # 修改用户UUID
+            modify_port_user_uuid "$port"
+            ;;
+            
+        5)
+            return
+            ;;
+            
+        *)
+            error
+            manage_port_users "$port"  # 返回用户管理菜单
+            return
+            ;;
+    esac
+}
+
+# 列出端口的所有用户
+list_port_users() {
+    local port=$1
+    local port_info=$(get_port_info "$port")
+    
+    echo
+    echo -e "$yellow 端口 $port 的所有用户 $none"
+    echo "----------------------------------------------------------------"
+    
+    local users=$(echo "$port_info" | jq -c '.users[]')
+    if [[ -z "$users" ]]; then
+        echo -e "$red 此端口没有配置任何用户 $none"
+        pause
+        manage_port_users "$port"  # 返回用户管理菜单
+        return
+    fi
+    
+    echo -e "${cyan}序号   UUID    邮箱${none}"
+    echo "----------------------------------------------------------------"
+    
+    local index=1
+    echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
+        local uuid=$(echo "$user_info" | jq -r '.uuid')
+        local email=$(echo "$user_info" | jq -r '.email')
+        # 截取UUID的开头和结尾部分，中间用省略号
+        local uuid_short="${uuid:0:8}...${uuid:24}"
+        
+        echo -e "${green}$index${none}    ${yellow}$uuid_short${none}    ${magenta}$email${none}"
+        index=$((index+1))
+    done
+    
+    echo "----------------------------------------------------------------"
+    pause
+    manage_port_users "$port"  # 返回用户管理菜单
+}
+
+# 添加新用户
+add_port_user() {
+    local port=$1
+    local port_info=$(get_port_info "$port")
+    
+    echo
+    echo -e "$yellow 添加新用户 - 端口 $port $none"
+    echo "----------------------------------------------------------------"
+    
+    # 生成随机UUID
+    local ip=$([ "$netstack" = "6" ] && echo "$IPv6" || echo "$IPv4")
+    local uuidSeed=${ip}$(cat /proc/sys/kernel/hostname)$(cat /etc/timezone)${port}$(date +%s%N)
+    local default_uuid=$(curl -sL https://www.uuidtools.com/api/generate/v3/namespace/ns:dns/name/${uuidSeed} | grep -oP '[^-]{8}-[^-]{4}-[^-]{4}-[^-]{4}-[^-]{12}')
+    
+    # 输入UUID
+    while :; do
+        echo -e "请输入新用户的 "${yellow}"UUID"${none}" "
+        read -p "$(echo -e "(默认ID: ${cyan}${default_uuid}${none}): ")" uuid
+        [ -z "$uuid" ] && uuid=$default_uuid
+        
+        if [[ ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            error
+            continue
+        fi
+        
+        # 检查UUID是否已存在
+        local uuid_exists=$(echo "$port_info" | jq -r '.users[] | select(.uuid == "'$uuid'") | .uuid')
+        if [[ -n "$uuid_exists" ]]; then
+            echo -e "${red}UUID已存在，请使用其他UUID${none}"
+            continue
+        fi
+        
+        echo
+        echo -e "$yellow UUID = ${cyan}$uuid${none}"
+        break
+    done
+    
+    # 输入邮箱
+    echo -e "请输入用户邮箱（用于标识，可选）"
+    read -p "$(echo -e "(默认: ${cyan}user@example.com${none}): ")" email
+    [ -z "$email" ] && email="user@example.com"
+    
+    echo
+    echo -e "$yellow 邮箱 = ${cyan}$email${none}"
+    
+    # 添加新用户
+    local updated_port_info=$(echo "$port_info" | jq '.users += [{uuid: "'$uuid'", email: "'$email'"}]')
+    
+    # 保存更新后的配置
+    jq "(.ports[] | select(.port == $port)) |= $updated_port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+    chmod 600 "$PORT_INFO_FILE"
+    
+    success "用户添加成功!"
+    log_info "为端口 $port 添加新用户 UUID: $uuid, 邮箱: $email"
+    
+    # 更新配置文件并重启服务
+    update_config_file
+    systemctl restart xray
+    
+    # 生成连接信息
+    local domain=$(echo "$port_info" | jq -r '.domain')
+    local public_key=$(echo "$port_info" | jq -r '.public_key')
+    local shortid=$(echo "$port_info" | jq -r '.shortid')
+    
+    # 生成链接
+    if [[ $netstack = "6" ]]; then
+        ip="[$ip]"
+    fi
+    
+    vless_reality_url="vless://${uuid}@${ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=random&pbk=${public_key}&sid=${shortid}&#VLESS_R_${port}_${email}"
+    
+    echo
+    echo "---------- 新用户的 VLESS Reality URL ----------"
+    echo -e "${cyan}${vless_reality_url}${none}"
+    echo
+    
+    # 生成二维码
+    echo "二维码:"
+    qrencode -t UTF8 "$vless_reality_url"
+    
+    # 保存信息到文件
+    echo "$vless_reality_url" > "$HOME/vless_reality_${port}_${email}.txt"
+    echo "链接信息已保存到 $HOME/vless_reality_${port}_${email}.txt"
+    
+    pause
+    manage_port_users "$port"  # 返回用户管理菜单
+}
+
+# 删除用户
+delete_port_user() {
+    local port=$1
+    local port_info=$(get_port_info "$port")
+    
+    echo
+    echo -e "$yellow 删除用户 - 端口 $port $none"
+    echo "----------------------------------------------------------------"
+    
+    # 列出所有用户
+    local users=$(echo "$port_info" | jq -c '.users[]')
+    if [[ -z "$users" ]]; then
+        echo -e "$red 此端口没有配置任何用户 $none"
+        pause
+        manage_port_users "$port"  # 返回用户管理菜单
+        return
+    fi
+    
+    echo -e "${cyan}序号   UUID    邮箱${none}"
+    echo "----------------------------------------------------------------"
+    
+    local index=1
+    echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
+        local uuid=$(echo "$user_info" | jq -r '.uuid')
+        local email=$(echo "$user_info" | jq -r '.email')
+        # 截取UUID的开头和结尾部分，中间用省略号
+        local uuid_short="${uuid:0:8}...${uuid:24}"
+        
+        echo -e "${green}$index${none}    ${yellow}$uuid_short${none}    ${magenta}$email${none}"
+        index=$((index+1))
+    done
+    
+    echo "----------------------------------------------------------------"
+    
+    # 获取用户数量
+    local user_count=$(echo "$port_info" | jq '.users | length')
+    
+    # 至少保留一个用户
+    if [[ $user_count -le 1 ]]; then
+        echo -e "${red}至少需要保留一个用户，无法删除${none}"
+        pause
+        manage_port_users "$port"  # 返回用户管理菜单
+        return
+    fi
+    
+    # 选择要删除的用户
+    while :; do
+        read -p "$(echo -e "请选择要删除的用户序号 [${green}1-$user_count${none}], 输入 0 取消: ")" user_index
+        
+        if [[ "$user_index" == "0" ]]; then
+            echo -e "$yellow 操作已取消 $none"
+            manage_port_users "$port"  # 返回用户管理菜单
+            return
+        fi
+        
+        if [[ -z "$user_index" ]] || ! [[ "$user_index" =~ ^[0-9]+$ ]] || [[ "$user_index" -lt 1 ]] || [[ "$user_index" -gt "$user_count" ]]; then
+            error
+            continue
+        fi
+        
+        break
+    done
+    
+    # 获取要删除的用户信息
+    local user_to_delete=$(echo "$port_info" | jq -c ".users[$(($user_index-1))]")
+    local uuid_to_delete=$(echo "$user_to_delete" | jq -r '.uuid')
+    local email_to_delete=$(echo "$user_to_delete" | jq -r '.email')
+    
+    echo
+    echo -e "$yellow 确认要删除以下用户吗? $none"
+    echo -e "UUID: ${cyan}$uuid_to_delete${none}"
+    echo -e "邮箱: ${cyan}$email_to_delete${none}"
+    read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" confirm_delete
+    
+    if [[ "$confirm_delete" == "y" ]]; then
+        # 删除用户
+        local updated_port_info=$(echo "$port_info" | jq "del(.users[$(($user_index-1))])")
+        
+        # 保存更新后的配置
+        jq "(.ports[] | select(.port == $port)) |= $updated_port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+        mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"
+        
+        success "用户删除成功!"
+        log_info "从端口 $port 删除用户 UUID: $uuid_to_delete, 邮箱: $email_to_delete"
+        
+        # 更新配置文件并重启服务
+        update_config_file
+        systemctl restart xray
+    else
+        echo -e "$yellow 操作已取消 $none"
+    fi
+    
+    pause
+    manage_port_users "$port"  # 返回用户管理菜单
+}
+
+# 修改用户UUID
+modify_port_user_uuid() {
+    local port=$1
+    local port_info=$(get_port_info "$port")
+    
+    echo
+    echo -e "$yellow 修改用户UUID - 端口 $port $none"
+    echo "----------------------------------------------------------------"
+    
+    # 列出所有用户
+    local users=$(echo "$port_info" | jq -c '.users[]')
+    if [[ -z "$users" ]]; then
+        echo -e "$red 此端口没有配置任何用户 $none"
+        pause
+        manage_port_users "$port"  # 返回用户管理菜单
+        return
+    fi
+    
+    echo -e "${cyan}序号   UUID    邮箱${none}"
+    echo "----------------------------------------------------------------"
+    
+    local index=1
+    echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
+        local uuid=$(echo "$user_info" | jq -r '.uuid')
+        local email=$(echo "$user_info" | jq -r '.email')
+        # 截取UUID的开头和结尾部分，中间用省略号
+        local uuid_short="${uuid:0:8}...${uuid:24}"
+        
+        echo -e "${green}$index${none}    ${yellow}$uuid_short${none}    ${magenta}$email${none}"
+        index=$((index+1))
+    done
+    
+    echo "----------------------------------------------------------------"
+    
+    # 获取用户数量
+    local user_count=$(echo "$port_info" | jq '.users | length')
+    
+    # 选择要修改的用户
+    while :; do
+        read -p "$(echo -e "请选择要修改的用户序号 [${green}1-$user_count${none}], 输入 0 取消: ")" user_index
+        
+        if [[ "$user_index" == "0" ]]; then
+            echo -e "$yellow 操作已取消 $none"
+            manage_port_users "$port"  # 返回用户管理菜单
+            return
+        fi
+        
+        if [[ -z "$user_index" ]] || ! [[ "$user_index" =~ ^[0-9]+$ ]] || [[ "$user_index" -lt 1 ]] || [[ "$user_index" -gt "$user_count" ]]; then
+            error
+            continue
+        fi
+        
+        break
+    done
+    
+    # 获取要修改的用户信息
+    local user_to_modify=$(echo "$port_info" | jq -c ".users[$(($user_index-1))]")
+    local old_uuid=$(echo "$user_to_modify" | jq -r '.uuid')
+    local email=$(echo "$user_to_modify" | jq -r '.email')
+    
+    echo
+    echo -e "$yellow 当前用户信息 $none"
+    echo -e "UUID: ${cyan}$old_uuid${none}"
+    echo -e "邮箱: ${cyan}$email${none}"
+    
+    # 生成随机UUID
+    local ip=$([ "$netstack" = "6" ] && echo "$IPv6" || echo "$IPv4")
+    local uuidSeed=${ip}$(cat /proc/sys/kernel/hostname)$(cat /etc/timezone)${port}$(date +%s%N)
+    local default_uuid=$(curl -sL https://www.uuidtools.com/api/generate/v3/namespace/ns:dns/name/${uuidSeed} | grep -oP '[^-]{8}-[^-]{4}-[^-]{4}-[^-]{4}-[^-]{12}')
+    
+    # 输入新UUID
+    while :; do
+        echo -e "请输入新的UUID"
+        read -p "$(echo -e "(默认: ${cyan}${default_uuid}${none}): ")" new_uuid
+        [ -z "$new_uuid" ] && new_uuid=$default_uuid
+        
+        if [[ ! "$new_uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            error
+            continue
+        fi
+        
+        # 检查UUID是否已存在
+        if [[ "$new_uuid" != "$old_uuid" ]]; then
+            local uuid_exists=$(echo "$port_info" | jq -r '.users[] | select(.uuid == "'$new_uuid'") | .uuid')
+            if [[ -n "$uuid_exists" ]]; then
+                echo -e "${red}UUID已存在，请使用其他UUID${none}"
+                continue
+            fi
+        fi
+        
+        echo
+        echo -e "$yellow 新UUID = ${cyan}$new_uuid${none}"
+        break
+    done
+    
+    # 修改用户UUID
+    local updated_port_info=$(echo "$port_info" | jq ".users[$(($user_index-1))].uuid = \"$new_uuid\"")
+    
+    # 保存更新后的配置
+    jq "(.ports[] | select(.port == $port)) |= $updated_port_info" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
+    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+    chmod 600 "$PORT_INFO_FILE"
+    
+    success "用户UUID修改成功!"
+    log_info "修改端口 $port 用户UUID: $old_uuid -> $new_uuid, 邮箱: $email"
+    
+    # 更新配置文件并重启服务
+    update_config_file
+    systemctl restart xray
+    
+    # 生成连接信息
+    local domain=$(echo "$port_info" | jq -r '.domain')
+    local public_key=$(echo "$port_info" | jq -r '.public_key')
+    local shortid=$(echo "$port_info" | jq -r '.shortid')
+    
+    # 生成链接
+    if [[ $netstack = "6" ]]; then
+        ip="[$ip]"
+    fi
+    
+    vless_reality_url="vless://${new_uuid}@${ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=random&pbk=${public_key}&sid=${shortid}&#VLESS_R_${port}_${email}"
+    
+    echo
+    echo "---------- 修改后的 VLESS Reality URL ----------"
+    echo -e "${cyan}${vless_reality_url}${none}"
+    echo
+    
+    # 生成二维码
+    echo "二维码:"
+    qrencode -t UTF8 "$vless_reality_url"
+    
+    # 保存信息到文件
+    echo "$vless_reality_url" > "$HOME/vless_reality_${port}_${email}.txt"
+    echo "链接信息已保存到 $HOME/vless_reality_${port}_${email}.txt"
+    
+    pause
+    manage_port_users "$port"  # 返回用户管理菜单
 }
 
 # 修改端口的UUID
