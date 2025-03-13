@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.5"
+VERSION="1.3.0"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -2518,19 +2518,18 @@ show_all_connections() {
     echo -e "请选择要显示的端口:"
     echo -e "  ${green}0.${none} 显示所有端口"
     
+    # 获取所有端口并存储到数组
     local port_list=()
-    local index=1
+    local port_count=$(jq '.ports | length' "$PORT_INFO_FILE")
     
-    # 构建端口选择列表
-    jq -c '.ports[]' "$PORT_INFO_FILE" | while read -r port_info; do
-        local port=$(echo "$port_info" | jq -r '.port')
-        echo -e "  ${green}$index.${none} 端口 $port"
+    # 提前获取所有端口并存到数组中，避免在循环中创建数组的问题
+    for ((i=0; i<$port_count; i++)); do
+        local port=$(jq -r ".ports[$i].port" "$PORT_INFO_FILE")
         port_list+=("$port")
-        index=$((index+1))
+        echo -e "  ${green}$((i+1)).${none} 端口 $port"
     done
     
     # 读取端口选择
-    local port_count=${#port_list[@]}
     read -p "$(echo -e "请选择 [${green}0-$port_count${none}]: ")" port_choice
     
     # 默认为0（显示所有端口）
@@ -2553,15 +2552,15 @@ show_all_connections() {
         echo "----------------------------------------------------------------"
         
         # 遍历所有端口
-        jq -c '.ports[]' "$PORT_INFO_FILE" | while read -r port_info; do
-            local port=$(echo "$port_info" | jq -r '.port')
+        for ((i=0; i<$port_count; i++)); do
+            local port=${port_list[i]}
+            local port_info=$(jq -c ".ports[] | select(.port == $port)" "$PORT_INFO_FILE")
             local uuid=$(echo "$port_info" | jq -r '.uuid')
             local public_key=$(echo "$port_info" | jq -r '.public_key')
             local shortid=$(echo "$port_info" | jq -r '.shortid')
             local domain=$(echo "$port_info" | jq -r '.domain')
             
             # 检查是否有多个用户
-            local users=$(echo "$port_info" | jq -c '.users[]')
             local user_count=$(echo "$port_info" | jq '.users | length')
             
             echo
@@ -2570,7 +2569,8 @@ show_all_connections() {
             
             if [[ "$user_count" -gt 0 ]]; then
                 # 显示所有用户的连接信息
-                echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
+                for ((j=0; j<$user_count; j++)); do
+                    local user_info=$(echo "$port_info" | jq -c ".users[$j]")
                     local user_uuid=$(echo "$user_info" | jq -r '.uuid')
                     local user_email=$(echo "$user_info" | jq -r '.email')
                     
@@ -2594,7 +2594,6 @@ show_all_connections() {
         local domain=$(echo "$port_info" | jq -r '.domain')
         
         # 检查是否有多个用户
-        local users=$(echo "$port_info" | jq -c '.users[]')
         local user_count=$(echo "$port_info" | jq '.users | length')
         
         echo
@@ -2603,9 +2602,9 @@ show_all_connections() {
         
         # 如果只有一个用户，直接显示
         if [[ "$user_count" -eq 1 ]]; then
-            local single_user=$(echo "$port_info" | jq -c '.users[0]')
-            local user_uuid=$(echo "$single_user" | jq -r '.uuid')
-            local user_email=$(echo "$single_user" | jq -r '.email')
+            local user_info=$(echo "$port_info" | jq -c '.users[0]')
+            local user_uuid=$(echo "$user_info" | jq -r '.uuid')
+            local user_email=$(echo "$user_info" | jq -r '.email')
             
             echo -e "${cyan}用户: $user_email${none}"
             generate_user_connection_info "$selected_port" "$user_uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "$user_email"
@@ -2614,15 +2613,20 @@ show_all_connections() {
             echo -e "请选择要显示的用户:"
             echo -e "  ${green}0.${none} 显示所有用户"
             
-            local user_index=1
-            echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
+            # 提前获取所有用户信息
+            local user_emails=()
+            local user_uuids=()
+            
+            for ((i=0; i<$user_count; i++)); do
+                local user_info=$(echo "$port_info" | jq -c ".users[$i]")
                 local user_uuid=$(echo "$user_info" | jq -r '.uuid')
                 local user_email=$(echo "$user_info" | jq -r '.email')
+                user_emails+=("$user_email")
+                user_uuids+=("$user_uuid")
+                
                 # 截取UUID的开头和结尾部分，中间用省略号
                 local uuid_short="${user_uuid:0:8}...${user_uuid:24}"
-                
-                echo -e "  ${green}$user_index.${none} $user_email (UUID: $uuid_short)"
-                user_index=$((user_index+1))
+                echo -e "  ${green}$((i+1)).${none} $user_email (UUID: $uuid_short)"
             done
             
             # 读取用户选择
@@ -2635,9 +2639,9 @@ show_all_connections() {
             # 处理用户选择
             if [[ "$user_choice" == "0" ]]; then
                 # 显示所有用户
-                echo "$port_info" | jq -c '.users[]' | while read -r user_info; do
-                    local user_uuid=$(echo "$user_info" | jq -r '.uuid')
-                    local user_email=$(echo "$user_info" | jq -r '.email')
+                for ((i=0; i<$user_count; i++)); do
+                    local user_email=${user_emails[i]}
+                    local user_uuid=${user_uuids[i]}
                     
                     echo -e "${cyan}用户: $user_email${none}"
                     generate_user_connection_info "$selected_port" "$user_uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "$user_email"
@@ -2645,9 +2649,9 @@ show_all_connections() {
                 done
             elif [[ "$user_choice" =~ ^[0-9]+$ ]] && [[ "$user_choice" -ge 1 ]] && [[ "$user_choice" -le "$user_count" ]]; then
                 # 显示特定用户
-                local selected_user=$(echo "$port_info" | jq -c ".users[$(($user_choice-1))]")
-                local user_uuid=$(echo "$selected_user" | jq -r '.uuid')
-                local user_email=$(echo "$selected_user" | jq -r '.email')
+                local selected_index=$((user_choice-1))
+                local user_email=${user_emails[$selected_index]}
+                local user_uuid=${user_uuids[$selected_index]}
                 
                 echo -e "${cyan}用户: $user_email${none}"
                 generate_user_connection_info "$selected_port" "$user_uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack" "$user_email"
@@ -2725,6 +2729,18 @@ generate_user_connection_info() {
     # 生成二维码
     echo "二维码:"
     qrencode -t UTF8 "$vless_reality_url"
+    
+    # 保存信息到文件
+    local filename="vless_reality_${port}"
+    if [[ -n "$email" && "$email" != "默认用户" ]]; then
+        # 清理邮箱中可能导致文件名问题的字符
+        local sanitized_email=$(echo "$email" | sed 's/[^a-zA-Z0-9@._-]/_/g')
+        filename="${filename}_${sanitized_email}"
+    fi
+    
+    echo "$vless_reality_url" > "$HOME/${filename}.txt"
+    echo
+    echo "链接信息已保存到 $HOME/${filename}.txt"
 }
 
 
