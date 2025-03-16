@@ -430,10 +430,13 @@ cat > "$CONFIG_FILE" << EOL
   "dns": {
   "servers": [
     "8.8.8.8",
-    "8.8.4.4",
-    "localhost"
+    "1.1.1.1"
+    "1.0.0.1"
+    "8.8.4.4"
   ],
   "queryStrategy": "UseIPv4",
+  "disableCache": false,
+  "disableFallback": false,
   "tag": "dns-out"
 },
   "inbounds": [],
@@ -563,7 +566,7 @@ EOL
 EOL
             else
                 cat >> "$temp_config.socks5" << EOL
-  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}}
+  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"tcpMptcp": true,"tcpNoDelay": true,"mark": 255}}
 EOL
             fi
             
