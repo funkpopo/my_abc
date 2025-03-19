@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.8"
+VERSION="1.2.9"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -429,10 +429,10 @@ cat > "$CONFIG_FILE" << EOL
   },
   "dns": {
   "servers": [
-    "8.8.8.8",
-    "1.1.1.1",
-    "1.0.0.1",
-    "8.8.4.4"
+    "tcp://8.8.8.8",
+    "tcp://1.1.1.1",
+    "tcp://1.0.0.1",
+    "tcp://8.8.4.4"
   ],
   "queryStrategy": "UseIPv4",
   "disableCache": true,
