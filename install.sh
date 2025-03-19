@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.91"
+VERSION="1.2.9"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -595,22 +595,6 @@ cat > "$temp_config.dns_rule" << EOL
   "type": "field",
   "inboundTag": ["inbound-${port}"],
   "port": 53,
-  "outboundTag": "dns-out"
-},
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "port": 853,
-  "outboundTag": "dns-out"
-},
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "domain": [
-        "domain:cloudflare-dns.com",
-        "domain:dns.google",
-        "geosite:category-dns"
-      ],
   "outboundTag": "dns-out"
 }
 EOL
