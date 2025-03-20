@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.9"
+VERSION="1.2.91"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -428,17 +428,18 @@ cat > "$CONFIG_FILE" << EOL
     "error": "/var/log/xray/error.log"
   },
   "dns": {
-  "servers": [
-    "tcp://8.8.8.8",
-    "tcp://1.1.1.1",
-    "tcp://1.0.0.1",
-    "tcp://8.8.4.4"
-  ],
-  "queryStrategy": "UseIPv4",
-  "disableCache": true,
-  "disableFallback": false,
-  "tag": "dns-out"
-},
+    "servers": [
+      "tcp://8.8.8.8",
+      "tcp://1.1.1.1",
+      "tcp://1.0.0.1",
+      "tcp://8.8.4.4",
+      "tcp://9.9.9.9"
+    ],
+    "queryStrategy": "UseIPv4",
+    "disableCache": true,
+    "disableFallback": false,
+    "tag": "dns-out"
+  },
   "inbounds": [],
   "outbounds": [
     {
@@ -465,6 +466,24 @@ cat > "$CONFIG_FILE" << EOL
           "geoip:private"
         ],
         "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "port": 853,
+        "outboundTag": "dns-out"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "dns.google",
+          "cloudflare-dns.com",
+          "mozilla.cloudflare-dns.com",
+          "1dot1dot1dot1.cloudflare-dns.com",
+          "dns.quad9.net",
+          "dns.adguard.com",
+          "dns.nextdns.io"
+        ],
+        "outboundTag": "dns-out"
       }
     ]
   }
@@ -515,7 +534,8 @@ cat > "$temp_config.inbound" << EOL
   },
   "sniffing": {
     "enabled": true,
-    "destOverride": ["http", "tls", "quic"]
+    "destOverride": ["http", "tls", "quic", "fakedns"],
+    "metadataOnly": false
   },
   "tag": "inbound-${port}"
 }
