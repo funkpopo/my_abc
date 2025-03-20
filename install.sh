@@ -432,8 +432,7 @@ cat > "$CONFIG_FILE" << EOL
       "tcp://8.8.8.8",
       "tcp://1.1.1.1",
       "tcp://1.0.0.1",
-      "tcp://8.8.4.4",
-      "localhost"
+      "tcp://8.8.4.4"
     ],
     "queryStrategy": "UseIPv4",
     "disableCache": true,
