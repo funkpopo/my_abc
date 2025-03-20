@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.93"
+VERSION="1.2.94"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -584,8 +584,7 @@ EOL
       "tcp://8.8.8.8",
       "tcp://1.1.1.1",
       "tcp://1.0.0.1",
-      "tcp://8.8.4.4",
-      "localhost"
+      "tcp://8.8.4.4"
     ],
     "clientIp": "172.16.0.1",
     "queryStrategy": "UseIPv4",
@@ -677,8 +676,7 @@ EOL
       "tcp://8.8.8.8",
       "tcp://1.1.1.1",
       "tcp://1.0.0.1",
-      "tcp://8.8.4.4",
-      "localhost"
+      "tcp://8.8.4.4"
     ],
     "clientIp": "172.16.0.1",
     "queryStrategy": "UseIPv4",
