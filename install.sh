@@ -420,6 +420,7 @@ update_config_file() {
     fi
     
 # 创建基本配置
+# 创建基本配置
 cat > "$CONFIG_FILE" << EOL
 {
   "log": {
@@ -469,7 +470,19 @@ cat > "$CONFIG_FILE" << EOL
       },
       {
         "type": "field",
+        "port": 53,
+        "outboundTag": "dns-out"
+      },
+      {
+        "type": "field",
         "port": 853,
+        "outboundTag": "dns-out"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "geosite:category-dns-over-https"
+        ],
         "outboundTag": "dns-out"
       },
       {
