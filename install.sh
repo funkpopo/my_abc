@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.96"
+VERSION="1.2.97"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -419,6 +419,13 @@ update_config_file() {
         cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     fi
     
+# 更新Xray配置文件
+update_config_file() {
+    # 备份当前配置
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    fi
+    
 # 创建基本配置
 cat > "$CONFIG_FILE" << EOL
 {
@@ -436,7 +443,8 @@ cat > "$CONFIG_FILE" << EOL
       "tcp://9.9.9.9",
       "tcp://149.112.112.112",
       "tcp://208.67.222.222",
-      "tcp://208.67.220.220"
+      "tcp://208.67.220.220",
+      "localhost"
     ],
     "queryStrategy": "UseIPv4",
     "disableCache": true,
@@ -601,10 +609,13 @@ EOL
         fi
     done
     
-    # 添加DNS规则（普通DNS - 端口53）
-    local inbound_tags_json=$(IFS=, ; echo "[\"${all_inbound_tags[*]}\"]" | sed 's/,/","/g')
-    
-    cat > "$temp_config.dns_rule" << EOL
+    # 如果有任何入站端口
+    if [ ${#all_inbound_tags[@]} -gt 0 ]; then
+        # 格式化入站标签为JSON数组
+        local inbound_tags_json=$(IFS=, ; echo "[\"${all_inbound_tags[*]}\"]" | sed 's/,/","/g')
+        
+        # 添加DNS规则（普通DNS - 端口53）
+        cat > "$temp_config.dns_rule" << EOL
 {
   "type": "field",
   "inboundTag": ${inbound_tags_json},
@@ -612,9 +623,9 @@ EOL
   "outboundTag": "dns-out"
 }
 EOL
-    
-    # 使用geosite形式添加DNS规则
-    cat > "$temp_config.geosite_dns_rule" << EOL
+        
+        # 使用geosite形式添加DNS规则
+        cat > "$temp_config.geosite_dns_rule" << EOL
 {
   "type": "field",
   "inboundTag": ${inbound_tags_json},
@@ -624,9 +635,9 @@ EOL
   "outboundTag": "dns-out"
 }
 EOL
-    
-    # 添加DoT DNS规则（端口853）
-    cat > "$temp_config.dot_dns_rule" << EOL
+        
+        # 添加DoT DNS规则（端口853）
+        cat > "$temp_config.dot_dns_rule" << EOL
 {
   "type": "field",
   "inboundTag": ${inbound_tags_json},
@@ -635,16 +646,17 @@ EOL
   "outboundTag": "dns-out"
 }
 EOL
-    
-    # 添加所有DNS路由规则
-    jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
-    mv "$temp_config.new" "$temp_config"
-    
-    jq ".routing.rules += [$(cat "$temp_config.geosite_dns_rule")]" "$temp_config" > "$temp_config.new"
-    mv "$temp_config.new" "$temp_config"
-    
-    jq ".routing.rules += [$(cat "$temp_config.dot_dns_rule")]" "$temp_config" > "$temp_config.new"
-    mv "$temp_config.new" "$temp_config"
+        
+        # 添加所有DNS路由规则
+        jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
+        mv "$temp_config.new" "$temp_config"
+        
+        jq ".routing.rules += [$(cat "$temp_config.geosite_dns_rule")]" "$temp_config" > "$temp_config.new"
+        mv "$temp_config.new" "$temp_config"
+        
+        jq ".routing.rules += [$(cat "$temp_config.dot_dns_rule")]" "$temp_config" > "$temp_config.new"
+        mv "$temp_config.new" "$temp_config"
+    fi
     
     # 添加所有SOCKS5路由规则
     for rule in "${socks5_rules[@]}"; do
