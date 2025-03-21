@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.104"
+VERSION="1.2.9"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -412,7 +412,6 @@ delete_port_info() {
     log_info "删除端口 $port 配置"
 }
 
-
 # 更新Xray配置文件
 update_config_file() {
     # 备份当前配置
@@ -420,8 +419,8 @@ update_config_file() {
         cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     fi
     
-    # 创建基本配置
-    cat > "$CONFIG_FILE" << EOL
+# 创建基本配置
+cat > "$CONFIG_FILE" << EOL
 {
   "log": {
     "loglevel": "warning",
@@ -429,22 +428,17 @@ update_config_file() {
     "error": "/var/log/xray/error.log"
   },
   "dns": {
-    "servers": [
-      "tcp://8.8.8.8",
-      "tcp://1.1.1.1",
-      "tcp://1.0.0.1",
-      "tcp://8.8.4.4",
-      "tcp://9.9.9.9",
-      "tcp://149.112.112.112",
-      "tcp://208.67.222.222",
-      "tcp://208.67.220.220",
-      "localhost"
-    ],
-    "queryStrategy": "UseIPv4",
-    "disableCache": true,
-    "disableFallback": false,
-    "tag": "dns-out"
-  },
+  "servers": [
+    "tcp://8.8.8.8",
+    "tcp://1.1.1.1",
+    "tcp://1.0.0.1",
+    "tcp://8.8.4.4"
+  ],
+  "queryStrategy": "UseIPv4",
+  "disableCache": true,
+  "disableFallback": false,
+  "tag": "dns-out"
+},
   "inbounds": [],
   "outbounds": [
     {
@@ -477,24 +471,15 @@ update_config_file() {
 }
 EOL
     
+    # 读取所有端口配置
+    local ports_config=$(jq -c '.ports[]' "$PORT_INFO_FILE")
+    
     # 临时文件
     local temp_config=$(mktemp)
     cp "$CONFIG_FILE" "$temp_config"
     
-    # 存储所有入站标签
-    local all_inbound_tags=""
-    
-    # 存储所有的socks5路由规则
-    local all_socks5_rules=()
-    
-    # 避免在管道中使用循环，预先收集所有的端口信息
-    local all_ports=()
-    while IFS= read -r port_line; do
-        [[ -n "$port_line" ]] && all_ports+=("$port_line")
-    done < <(jq -c '.ports[]' "$PORT_INFO_FILE" 2>/dev/null || echo "")
-    
-    # 处理每个端口
-    for port_info in "${all_ports[@]}"; do
+    # 添加每个端口的入站配置
+    echo "$ports_config" | while read -r port_info; do
         local port=$(echo "$port_info" | jq -r '.port')
         local uuid=$(echo "$port_info" | jq -r '.uuid')
         local private_key=$(echo "$port_info" | jq -r '.private_key')
@@ -502,7 +487,7 @@ EOL
         local domain=$(echo "$port_info" | jq -r '.domain')
         
         # 创建入站配置
-        cat > "$temp_config.inbound" << EOL
+cat > "$temp_config.inbound" << EOL
 {
   "listen": "0.0.0.0",
   "port": ${port},
@@ -530,8 +515,7 @@ EOL
   },
   "sniffing": {
     "enabled": true,
-    "destOverride": ["http", "tls", "quic"],
-    "metadataOnly": false
+    "destOverride": ["http", "tls", "quic"]
   },
   "tag": "inbound-${port}"
 }
@@ -541,17 +525,10 @@ EOL
         jq ".inbounds += [$(cat "$temp_config.inbound")]" "$temp_config" > "$temp_config.new"
         mv "$temp_config.new" "$temp_config"
         
-        # 添加入站标签到字符串
-        if [[ -n "$all_inbound_tags" ]]; then
-            all_inbound_tags="${all_inbound_tags},\"inbound-${port}\""
-        else
-            all_inbound_tags="\"inbound-${port}\""
-        fi
-        
         # 处理SOCKS5代理配置
         local socks5_config=$(echo "$port_info" | jq -r '.socks5')
         
-        if [[ "$socks5_config" != "null" && "$(echo "$socks5_config" | jq -r '.enabled // false')" == "true" ]]; then
+        if [[ "$socks5_config" != "null" && "$(echo "$socks5_config" | jq -r '.enabled')" == "true" ]]; then
             local socks5_address=$(echo "$socks5_config" | jq -r '.address')
             local socks5_port=$(echo "$socks5_config" | jq -r '.port')
             local auth_needed=$(echo "$socks5_config" | jq -r '.auth_needed')
@@ -602,101 +579,47 @@ EOL
             jq ".outbounds += [$(cat "$temp_config.socks5")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
             
-            # 创建SOCKS5路由规则文件（确保JSON格式正确）
-            cat > "$temp_config.socks5rule" << EOL
+            # 创建路由规则
+            local network_type=$(if [[ "$udp_over_tcp" == "true" ]]; then echo "tcp,udp"; else echo "tcp"; fi)
+            cat > "$temp_config.rule" << EOL
 {
   "type": "field",
   "inboundTag": ["inbound-${port}"],
   "outboundTag": "${socks5_tag}"
 }
 EOL
-            # 将SOCKS5路由规则存储到数组中，稍后添加
-            all_socks5_rules+=("$(cat "$temp_config.socks5rule")")
-        fi
-    done
-    
-    # 检查是否有入站端口
-    if [[ -n "$all_inbound_tags" ]]; then
-        # 添加DNS规则（普通DNS - 端口53）
-        cat > "$temp_config.dns_rule" << EOL
+            
+            # 添加DNS路由规则
+cat > "$temp_config.dns_rule" << EOL
 {
   "type": "field",
-  "inboundTag": [${all_inbound_tags}],
+  "inboundTag": ["inbound-${port}"],
   "port": 53,
   "outboundTag": "dns-out"
 }
 EOL
-        
-        # 使用geosite形式添加DNS规则
-        cat > "$temp_config.geosite_dns_rule" << EOL
-{
-  "type": "field",
-  "inboundTag": [${all_inbound_tags}],
-  "domain": [
-    "dns.google",
-    "dns.google.com",
-    "8.8.8.8.dns.google",
-    "8.8.4.4.dns.google",
-    "dns64.dns.google",
-    "dns.quad9.net",
-    "cloudflare-dns.com",
-    "one.one.one.one",
-    "1dot1dot1dot1.cloudflare-dns.com",
-    "mozilla.cloudflare-dns.com",
-    "security.cloudflare-dns.com",
-    "family.cloudflare-dns.com",
-    "dns.cloudflare.com",
-    "doh.dns.sb",
-    "doh.opendns.com",
-    "doh.familyshield.opendns.com",
-    "dns.adguard.com",
-    "dns-family.adguard.com",
-    "dns-unfiltered.adguard.com",
-    "dns.google.cn"
-  ],
-  "outboundTag": "dns-out"
-}
-EOL
-        
-        # 添加DoT DNS规则（端口853）
-        cat > "$temp_config.dot_dns_rule" << EOL
-{
-  "type": "field",
-  "inboundTag": [${all_inbound_tags}],
-  "port": 853,
-  "network": "tcp",
-  "outboundTag": "dns-out"
-}
-EOL
-        
-        # 添加所有DNS路由规则
-        jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
-        mv "$temp_config.new" "$temp_config"
-        
-        jq ".routing.rules += [$(cat "$temp_config.geosite_dns_rule")]" "$temp_config" > "$temp_config.new"
-        mv "$temp_config.new" "$temp_config"
-        
-        jq ".routing.rules += [$(cat "$temp_config.dot_dns_rule")]" "$temp_config" > "$temp_config.new"
-        mv "$temp_config.new" "$temp_config"
-        
-        # 现在添加所有的SOCKS5路由规则
-        for socks5_rule in "${all_socks5_rules[@]}"; do
-            jq ".routing.rules += [$socks5_rule]" "$temp_config" > "$temp_config.new"
+            
+            # 添加DNS路由规则
+            jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
-        done
-    fi
+            
+            # 添加路由规则
+            jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
+            mv "$temp_config.new" "$temp_config"
+            
+
+        fi
+    done
     
     # 应用新配置
     cp "$temp_config" "$CONFIG_FILE"
     chmod 644 "$CONFIG_FILE"
     
     # 清理临时文件
-    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.socks5rule" "$temp_config.dns_rule" "$temp_config.geosite_dns_rule" "$temp_config.dot_dns_rule" "$temp_config.new" 2>/dev/null
+    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.new" 2>/dev/null
 
     log_info "配置文件已更新"
 }
-
-
 
 # 检查Xray服务状态
 check_xray_service() {
@@ -884,52 +807,17 @@ add_port_configuration() {
     echo "如果你不懂这段话是什么意思, 请直接回车"
     read -p "$(echo -e "输入 ${cyan}4${none} 表示IPv4, ${cyan}6${none} 表示IPv6: ") " netstack
     
-    # 根据用户输入和可用IP智能选择网络栈
     if [[ $netstack = "4" ]]; then
-        # 用户明确选择IPv4
+        ip=${IPv4}
+    elif [[ $netstack = "6" ]]; then
+        ip=${IPv6}
+    else
         if [[ -n "$IPv4" ]]; then
             ip=${IPv4}
             netstack=4
-        else
-            echo -e "${yellow}警告: 未检测到IPv4地址，将尝试使用IPv6${none}"
-            if [[ -n "$IPv6" ]]; then
-                ip=${IPv6}
-                netstack=6
-            else
-                warn "未检测到可用的IP地址"
-            fi
-        fi
-    elif [[ $netstack = "6" ]]; then
-        # 用户明确选择IPv6
-        if [[ -n "$IPv6" ]]; then
-            ip=${IPv6}
-            netstack=6
-        else
-            echo -e "${yellow}警告: 未检测到IPv6地址，将尝试使用IPv4${none}"
-            if [[ -n "$IPv4" ]]; then
-                ip=${IPv4}
-                netstack=4
-            else
-                warn "未检测到可用的IP地址"
-            fi
-        fi
-    else
-        # 用户未明确选择，自动判断
-        if [[ -n "$IPv4" && -n "$IPv6" ]]; then
-            # 双栈情况，默认使用IPv4
-            ip=${IPv4}
-            netstack=4
-            echo -e "${green}检测到双栈环境，默认使用IPv4${none}"
-        elif [[ -n "$IPv4" ]]; then
-            # 只有IPv4
-            ip=${IPv4}
-            netstack=4
-            echo -e "${green}检测到IPv4环境${none}"
         elif [[ -n "$IPv6" ]]; then
-            # 只有IPv6
             ip=${IPv6}
             netstack=6
-            echo -e "${green}检测到IPv6环境${none}"
         else
             warn "没有获取到公共IP"
         fi
@@ -1130,22 +1018,6 @@ generate_connection_info() {
     local domain=$5
     local ip=$6
     local netstack=$7
-
-    # 如果IP为空，尝试重新获取
-    if [[ -z "$ip" ]]; then
-        get_local_ips
-        if [[ "$netstack" = "6" ]]; then
-            ip="$IPv6"
-        else
-            ip="$IPv4"
-        fi
-        
-        # 如果仍然为空，给出警告
-        if [[ -z "$ip" ]]; then
-            echo -e "${red}警告: 无法获取IP地址，生成的URL可能不完整${none}"
-            log_warn "生成连接信息时无法获取IP地址"
-        fi
-    fi
     
     echo
     echo "---------- 端口 $port 的 Xray 配置信息 -------------"
