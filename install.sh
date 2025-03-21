@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.100"
+VERSION="1.2.101"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -437,7 +437,8 @@ update_config_file() {
       "tcp://9.9.9.9",
       "tcp://149.112.112.112",
       "tcp://208.67.222.222",
-      "tcp://208.67.220.220"
+      "tcp://208.67.220.220",
+      "localhost"
     ],
     "queryStrategy": "UseIPv4",
     "disableCache": true,
@@ -480,8 +481,9 @@ EOL
     local temp_config=$(mktemp)
     cp "$CONFIG_FILE" "$temp_config"
     
-    # 存储所有入站标签
+    # 存储所有入站标签和SOCKS5配置信息
     local all_inbound_tags=""
+    local socks5_configs=() # 存储SOCKS5配置信息
     
     # 避免在管道中使用循环，预先收集所有的端口信息
     local all_ports=()
@@ -489,7 +491,7 @@ EOL
         [[ -n "$port_line" ]] && all_ports+=("$port_line")
     done < <(jq -c '.ports[]' "$PORT_INFO_FILE" 2>/dev/null || echo "")
     
-    # 处理每个端口
+    # 第一步：添加所有入站配置
     for port_info in "${all_ports[@]}"; do
         local port=$(echo "$port_info" | jq -r '.port')
         local uuid=$(echo "$port_info" | jq -r '.uuid')
@@ -544,75 +546,14 @@ EOL
             all_inbound_tags="\"inbound-${port}\""
         fi
         
-        # 处理SOCKS5代理配置
+        # 保存SOCKS5配置信息以备后用
         local socks5_config=$(echo "$port_info" | jq -r '.socks5')
-        
         if [[ "$socks5_config" != "null" && "$(echo "$socks5_config" | jq -r '.enabled // false')" == "true" ]]; then
-            local socks5_address=$(echo "$socks5_config" | jq -r '.address')
-            local socks5_port=$(echo "$socks5_config" | jq -r '.port')
-            local auth_needed=$(echo "$socks5_config" | jq -r '.auth_needed')
-            local socks5_user=$(echo "$socks5_config" | jq -r '.username')
-            local socks5_pass=$(echo "$socks5_config" | jq -r '.password')
-            local udp_over_tcp=$(echo "$socks5_config" | jq -r '.udp_over_tcp')
-            local socks5_tag="socks5-out-$port"
-            
-            # 创建SOCKS5出站配置
-            cat > "$temp_config.socks5" << EOL
-{
-  "protocol": "socks",
-  "settings": {
-    "servers": [
-      {
-        "address": "${socks5_address}",
-        "port": ${socks5_port}
-EOL
-
-            if [[ "$auth_needed" == "true" ]]; then
-                cat >> "$temp_config.socks5" << EOL
-        ,"users": [{"user": "${socks5_user}","pass": "${socks5_pass}"}]
-EOL
-            fi
-            
-            cat >> "$temp_config.socks5" << EOL
-      }
-    ]
-  }
-EOL
-
-            if [[ "$udp_over_tcp" == "true" ]]; then
-                cat >> "$temp_config.socks5" << EOL
-  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}},"transportLayer": true
-EOL
-            else
-                cat >> "$temp_config.socks5" << EOL
-  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"tcpMptcp": true,"tcpNoDelay": true,"mark": 255}}
-EOL
-            fi
-            
-            cat >> "$temp_config.socks5" << EOL
-  ,"tag": "${socks5_tag}"
-}
-EOL
-
-            # 添加SOCKS5出站到主配置
-            jq ".outbounds += [$(cat "$temp_config.socks5")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
-            
-            # 创建SOCKS5路由规则文件（确保JSON格式正确）
-            cat > "$temp_config.socks5rule" << EOL
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "outboundTag": "${socks5_tag}"
-}
-EOL
-            # 添加SOCKS5路由规则到配置
-            jq ".routing.rules += [$(cat "$temp_config.socks5rule")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
+            socks5_configs+=("$port,$socks5_config")
         fi
     done
     
-    # 检查是否有入站端口
+    # 第二步：添加DNS解析规则（如果有入站端口）
     if [[ -n "$all_inbound_tags" ]]; then
         # 添加DNS规则（普通DNS - 端口53）
         cat > "$temp_config.dns_rule" << EOL
@@ -657,6 +598,73 @@ EOL
         jq ".routing.rules += [$(cat "$temp_config.dot_dns_rule")]" "$temp_config" > "$temp_config.new"
         mv "$temp_config.new" "$temp_config"
     fi
+    
+    # 第三步：添加SOCKS5出站配置和路由规则
+    for socks5_info in "${socks5_configs[@]}"; do
+        IFS=',' read -r port socks5_json <<< "$socks5_info"
+        
+        local socks5_address=$(echo "$socks5_json" | jq -r '.address')
+        local socks5_port=$(echo "$socks5_json" | jq -r '.port')
+        local auth_needed=$(echo "$socks5_json" | jq -r '.auth_needed')
+        local socks5_user=$(echo "$socks5_json" | jq -r '.username')
+        local socks5_pass=$(echo "$socks5_json" | jq -r '.password')
+        local udp_over_tcp=$(echo "$socks5_json" | jq -r '.udp_over_tcp')
+        local socks5_tag="socks5-out-$port"
+        
+        # 创建SOCKS5出站配置
+        cat > "$temp_config.socks5" << EOL
+{
+  "protocol": "socks",
+  "settings": {
+    "servers": [
+      {
+        "address": "${socks5_address}",
+        "port": ${socks5_port}
+EOL
+
+        if [[ "$auth_needed" == "true" ]]; then
+            cat >> "$temp_config.socks5" << EOL
+        ,"users": [{"user": "${socks5_user}","pass": "${socks5_pass}"}]
+EOL
+        fi
+        
+        cat >> "$temp_config.socks5" << EOL
+      }
+    ]
+  }
+EOL
+
+        if [[ "$udp_over_tcp" == "true" ]]; then
+            cat >> "$temp_config.socks5" << EOL
+  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}},"transportLayer": true
+EOL
+        else
+            cat >> "$temp_config.socks5" << EOL
+  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"tcpMptcp": true,"tcpNoDelay": true,"mark": 255}}
+EOL
+        fi
+        
+        cat >> "$temp_config.socks5" << EOL
+  ,"tag": "${socks5_tag}"
+}
+EOL
+
+        # 添加SOCKS5出站到主配置
+        jq ".outbounds += [$(cat "$temp_config.socks5")]" "$temp_config" > "$temp_config.new"
+        mv "$temp_config.new" "$temp_config"
+        
+        # 创建SOCKS5路由规则
+        cat > "$temp_config.socks5rule" << EOL
+{
+  "type": "field",
+  "inboundTag": ["inbound-${port}"],
+  "outboundTag": "${socks5_tag}"
+}
+EOL
+        # 添加SOCKS5路由规则到配置
+        jq ".routing.rules += [$(cat "$temp_config.socks5rule")]" "$temp_config" > "$temp_config.new"
+        mv "$temp_config.new" "$temp_config"
+    done
     
     # 应用新配置
     cp "$temp_config" "$CONFIG_FILE"
