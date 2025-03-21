@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.98"
+VERSION="1.2.99"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -481,15 +481,14 @@ EOL
     local temp_config=$(mktemp)
     cp "$CONFIG_FILE" "$temp_config"
     
-    # 存储所有入站标签和SOCKS5配置
+    # 存储所有入站标签
     local all_inbound_tags=""
-    local socks5_rules=""
     
     # 避免在管道中使用循环，预先收集所有的端口信息
     local all_ports=()
     while IFS= read -r port_line; do
         [[ -n "$port_line" ]] && all_ports+=("$port_line")
-    done < <(jq -c '.ports[]' "$PORT_INFO_FILE" 2>/dev/null)
+    done < <(jq -c '.ports[]' "$PORT_INFO_FILE" 2>/dev/null || echo "")
     
     # 处理每个端口
     for port_info in "${all_ports[@]}"; do
@@ -539,7 +538,7 @@ EOL
         jq ".inbounds += [$(cat "$temp_config.inbound")]" "$temp_config" > "$temp_config.new"
         mv "$temp_config.new" "$temp_config"
         
-        # 添加入站标签到数组
+        # 添加入站标签到字符串
         if [[ -n "$all_inbound_tags" ]]; then
             all_inbound_tags="${all_inbound_tags},\"inbound-${port}\""
         else
@@ -600,16 +599,17 @@ EOL
             jq ".outbounds += [$(cat "$temp_config.socks5")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
             
-            # 添加SOCKS5路由规则
-            socks5_rules="${socks5_rules}$(cat << EOL
-
+            # 创建SOCKS5路由规则文件（确保JSON格式正确）
+            cat > "$temp_config.socks5rule" << EOL
 {
   "type": "field",
   "inboundTag": ["inbound-${port}"],
   "outboundTag": "${socks5_tag}"
 }
 EOL
-)"
+            # 添加SOCKS5路由规则到配置
+            jq ".routing.rules += [$(cat "$temp_config.socks5rule")]" "$temp_config" > "$temp_config.new"
+            mv "$temp_config.new" "$temp_config"
         fi
     done
     
@@ -659,28 +659,15 @@ EOL
         mv "$temp_config.new" "$temp_config"
     fi
     
-    # 添加所有SOCKS5路由规则
-    if [[ -n "$socks5_rules" ]]; then
-        # 分割多个规则并逐个添加
-        while IFS= read -r rule; do
-            if [[ -n "$rule" && "$rule" != "" ]]; then
-                echo "$rule" > "$temp_config.rule"
-                jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
-                mv "$temp_config.new" "$temp_config"
-            fi
-        done <<< "$socks5_rules"
-    fi
-    
     # 应用新配置
     cp "$temp_config" "$CONFIG_FILE"
     chmod 644 "$CONFIG_FILE"
     
     # 清理临时文件
-    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.geosite_dns_rule" "$temp_config.dot_dns_rule" "$temp_config.new" 2>/dev/null
+    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.socks5rule" "$temp_config.dns_rule" "$temp_config.geosite_dns_rule" "$temp_config.dot_dns_rule" "$temp_config.new" 2>/dev/null
 
     log_info "配置文件已更新"
 }
-
 
 # 检查Xray服务状态
 check_xray_service() {
