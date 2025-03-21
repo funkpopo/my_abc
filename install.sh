@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.97"
+VERSION="1.2.98"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -420,8 +420,8 @@ update_config_file() {
         cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     fi
     
-# 创建基本配置
-cat > "$CONFIG_FILE" << EOL
+    # 创建基本配置
+    cat > "$CONFIG_FILE" << EOL
 {
   "log": {
     "loglevel": "warning",
@@ -477,19 +477,22 @@ cat > "$CONFIG_FILE" << EOL
 }
 EOL
     
-    # 读取所有端口配置
-    local ports_config=$(jq -c '.ports[]' "$PORT_INFO_FILE")
-    
     # 临时文件
     local temp_config=$(mktemp)
     cp "$CONFIG_FILE" "$temp_config"
     
-    # 存储所有入站标签
-    local all_inbound_tags=()
-    local socks5_rules=()
+    # 存储所有入站标签和SOCKS5配置
+    local all_inbound_tags=""
+    local socks5_rules=""
     
-    # 先添加所有入站配置和SOCKS5出站配置
-    echo "$ports_config" | while read -r port_info; do
+    # 避免在管道中使用循环，预先收集所有的端口信息
+    local all_ports=()
+    while IFS= read -r port_line; do
+        [[ -n "$port_line" ]] && all_ports+=("$port_line")
+    done < <(jq -c '.ports[]' "$PORT_INFO_FILE" 2>/dev/null)
+    
+    # 处理每个端口
+    for port_info in "${all_ports[@]}"; do
         local port=$(echo "$port_info" | jq -r '.port')
         local uuid=$(echo "$port_info" | jq -r '.uuid')
         local private_key=$(echo "$port_info" | jq -r '.private_key')
@@ -497,7 +500,7 @@ EOL
         local domain=$(echo "$port_info" | jq -r '.domain')
         
         # 创建入站配置
-cat > "$temp_config.inbound" << EOL
+        cat > "$temp_config.inbound" << EOL
 {
   "listen": "0.0.0.0",
   "port": ${port},
@@ -537,7 +540,11 @@ EOL
         mv "$temp_config.new" "$temp_config"
         
         # 添加入站标签到数组
-        all_inbound_tags+=("inbound-${port}")
+        if [[ -n "$all_inbound_tags" ]]; then
+            all_inbound_tags="${all_inbound_tags},\"inbound-${port}\""
+        else
+            all_inbound_tags="\"inbound-${port}\""
+        fi
         
         # 处理SOCKS5代理配置
         local socks5_config=$(echo "$port_info" | jq -r '.socks5')
@@ -593,42 +600,26 @@ EOL
             jq ".outbounds += [$(cat "$temp_config.socks5")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
             
-            # 记录SOCKS5路由规则
-            socks5_rules+=("
+            # 添加SOCKS5路由规则
+            socks5_rules="${socks5_rules}$(cat << EOL
+
 {
-  \"type\": \"field\",
-  \"inboundTag\": [\"inbound-${port}\"],
-  \"outboundTag\": \"${socks5_tag}\"
-}")
+  "type": "field",
+  "inboundTag": ["inbound-${port}"],
+  "outboundTag": "${socks5_tag}"
+}
+EOL
+)"
         fi
     done
     
-    # 添加DNS规则
     # 检查是否有入站端口
-    if [ ${#all_inbound_tags[@]} -gt 0 ]; then
-        # 格式化入站标签为JSON数组
-        # 修复可能的语法错误，确保正确处理数组转换
-        local inbound_tags_json
-        if [ ${#all_inbound_tags[@]} -eq 1 ]; then
-            # 只有一个标签时
-            inbound_tags_json="[\"${all_inbound_tags[0]}\"]"
-        else
-            # 多个标签时，使用更安全的方式连接
-            inbound_tags_json="["
-            for i in "${!all_inbound_tags[@]}"; do
-                if [ $i -gt 0 ]; then
-                    inbound_tags_json="${inbound_tags_json},"
-                fi
-                inbound_tags_json="${inbound_tags_json}\"${all_inbound_tags[$i]}\""
-            done
-            inbound_tags_json="${inbound_tags_json}]"
-        fi
-        
+    if [[ -n "$all_inbound_tags" ]]; then
         # 添加DNS规则（普通DNS - 端口53）
         cat > "$temp_config.dns_rule" << EOL
 {
   "type": "field",
-  "inboundTag": ${inbound_tags_json},
+  "inboundTag": [${all_inbound_tags}],
   "port": 53,
   "outboundTag": "dns-out"
 }
@@ -638,7 +629,7 @@ EOL
         cat > "$temp_config.geosite_dns_rule" << EOL
 {
   "type": "field",
-  "inboundTag": ${inbound_tags_json},
+  "inboundTag": [${all_inbound_tags}],
   "domain": [
     "geosite:dns"
   ],
@@ -650,7 +641,7 @@ EOL
         cat > "$temp_config.dot_dns_rule" << EOL
 {
   "type": "field",
-  "inboundTag": ${inbound_tags_json},
+  "inboundTag": [${all_inbound_tags}],
   "port": 853,
   "network": "tcp",
   "outboundTag": "dns-out"
@@ -669,11 +660,16 @@ EOL
     fi
     
     # 添加所有SOCKS5路由规则
-    for rule in "${socks5_rules[@]}"; do
-        echo "$rule" > "$temp_config.rule"
-        jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
-        mv "$temp_config.new" "$temp_config"
-    done
+    if [[ -n "$socks5_rules" ]]; then
+        # 分割多个规则并逐个添加
+        while IFS= read -r rule; do
+            if [[ -n "$rule" && "$rule" != "" ]]; then
+                echo "$rule" > "$temp_config.rule"
+                jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
+                mv "$temp_config.new" "$temp_config"
+            fi
+        done <<< "$socks5_rules"
+    fi
     
     # 应用新配置
     cp "$temp_config" "$CONFIG_FILE"
@@ -684,7 +680,6 @@ EOL
 
     log_info "配置文件已更新"
 }
-
 
 
 # 检查Xray服务状态
