@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.102"
+VERSION="1.2.103"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -865,17 +865,52 @@ add_port_configuration() {
     echo "如果你不懂这段话是什么意思, 请直接回车"
     read -p "$(echo -e "输入 ${cyan}4${none} 表示IPv4, ${cyan}6${none} 表示IPv6: ") " netstack
     
+    # 根据用户输入和可用IP智能选择网络栈
     if [[ $netstack = "4" ]]; then
-        ip=${IPv4}
-    elif [[ $netstack = "6" ]]; then
-        ip=${IPv6}
-    else
+        # 用户明确选择IPv4
         if [[ -n "$IPv4" ]]; then
             ip=${IPv4}
             netstack=4
-        elif [[ -n "$IPv6" ]]; then
+        else
+            echo -e "${yellow}警告: 未检测到IPv4地址，将尝试使用IPv6${none}"
+            if [[ -n "$IPv6" ]]; then
+                ip=${IPv6}
+                netstack=6
+            else
+                warn "未检测到可用的IP地址"
+            fi
+        fi
+    elif [[ $netstack = "6" ]]; then
+        # 用户明确选择IPv6
+        if [[ -n "$IPv6" ]]; then
             ip=${IPv6}
             netstack=6
+        else
+            echo -e "${yellow}警告: 未检测到IPv6地址，将尝试使用IPv4${none}"
+            if [[ -n "$IPv4" ]]; then
+                ip=${IPv4}
+                netstack=4
+            else
+                warn "未检测到可用的IP地址"
+            fi
+        fi
+    else
+        # 用户未明确选择，自动判断
+        if [[ -n "$IPv4" && -n "$IPv6" ]]; then
+            # 双栈情况，默认使用IPv4
+            ip=${IPv4}
+            netstack=4
+            echo -e "${green}检测到双栈环境，默认使用IPv4${none}"
+        elif [[ -n "$IPv4" ]]; then
+            # 只有IPv4
+            ip=${IPv4}
+            netstack=4
+            echo -e "${green}检测到IPv4环境${none}"
+        elif [[ -n "$IPv6" ]]; then
+            # 只有IPv6
+            ip=${IPv6}
+            netstack=6
+            echo -e "${green}检测到IPv6环境${none}"
         else
             warn "没有获取到公共IP"
         fi
@@ -1076,6 +1111,22 @@ generate_connection_info() {
     local domain=$5
     local ip=$6
     local netstack=$7
+
+    # 如果IP为空，尝试重新获取
+    if [[ -z "$ip" ]]; then
+        get_local_ips
+        if [[ "$netstack" = "6" ]]; then
+            ip="$IPv6"
+        else
+            ip="$IPv4"
+        fi
+        
+        # 如果仍然为空，给出警告
+        if [[ -z "$ip" ]]; then
+            echo -e "${red}警告: 无法获取IP地址，生成的URL可能不完整${none}"
+            log_warn "生成连接信息时无法获取IP地址"
+        fi
+    fi
     
     echo
     echo "---------- 端口 $port 的 Xray 配置信息 -------------"
