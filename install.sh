@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.95"
+VERSION="1.2.96"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -432,7 +432,11 @@ cat > "$CONFIG_FILE" << EOL
       "tcp://8.8.8.8",
       "tcp://1.1.1.1",
       "tcp://1.0.0.1",
-      "tcp://8.8.4.4"
+      "tcp://8.8.4.4",
+      "tcp://9.9.9.9",
+      "tcp://149.112.112.112",
+      "tcp://208.67.222.222",
+      "tcp://208.67.220.220"
     ],
     "queryStrategy": "UseIPv4",
     "disableCache": true,
@@ -478,7 +482,11 @@ EOL
     local temp_config=$(mktemp)
     cp "$CONFIG_FILE" "$temp_config"
     
-    # 添加每个端口的入站和路由规则
+    # 存储所有入站标签
+    local all_inbound_tags=()
+    local socks5_rules=()
+    
+    # 先添加所有入站配置和SOCKS5出站配置
     echo "$ports_config" | while read -r port_info; do
         local port=$(echo "$port_info" | jq -r '.port')
         local uuid=$(echo "$port_info" | jq -r '.uuid')
@@ -525,6 +533,9 @@ EOL
         # 添加入站配置到主配置
         jq ".inbounds += [$(cat "$temp_config.inbound")]" "$temp_config" > "$temp_config.new"
         mv "$temp_config.new" "$temp_config"
+        
+        # 添加入站标签到数组
+        all_inbound_tags+=("inbound-${port}")
         
         # 处理SOCKS5代理配置
         local socks5_config=$(echo "$port_info" | jq -r '.socks5')
@@ -580,124 +591,66 @@ EOL
             jq ".outbounds += [$(cat "$temp_config.socks5")]" "$temp_config" > "$temp_config.new"
             mv "$temp_config.new" "$temp_config"
             
-            # 添加DNS路由规则 - 普通DNS (端口53)
-            cat > "$temp_config.dns_rule" << EOL
+            # 记录SOCKS5路由规则
+            socks5_rules+=("
 {
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "port": 53,
-  "outboundTag": "dns-out"
-}
-EOL
-            
-            # 添加DNS路由规则 - HTTPS DNS (端口443，域名为常见DNS服务)
-            cat > "$temp_config.https_dns_rule" << EOL
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "port": 443,
-  "domain": [
-    "dns.google",
-    "cloudflare-dns.com",
-    "mozilla.cloudflare-dns.com",
-    "family.cloudflare-dns.com",
-    "dns.quad9.net",
-    "dns.adguard.com",
-    "dns-family.adguard.com",
-    "doh.dns.sb",
-    "dns.nextdns.io"
-  ],
-  "outboundTag": "dns-out"
-}
-EOL
-
-            # 添加DNS路由规则 - DoT DNS (端口853)
-            cat > "$temp_config.dot_dns_rule" << EOL
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "port": 853,
-  "network": "tcp",
-  "outboundTag": "dns-out"
-}
-EOL
-            
-            # 创建非DNS路由规则
-            cat > "$temp_config.rule" << EOL
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "outboundTag": "${socks5_tag}"
-}
-EOL
-            
-            # 添加各种DNS路由规则
-            jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
-            
-            jq ".routing.rules += [$(cat "$temp_config.https_dns_rule")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
-            
-            jq ".routing.rules += [$(cat "$temp_config.dot_dns_rule")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
-            
-            # 添加非DNS路由规则
-            jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
-        else
-            # 没有配置SOCKS5代理的情况，仍然处理DNS请求
-            # 添加DNS路由规则 - 普通DNS (端口53)
-            cat > "$temp_config.dns_rule" << EOL
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "port": 53,
-  "outboundTag": "dns-out"
-}
-EOL
-            
-            # 添加DNS路由规则 - HTTPS DNS (端口443，域名为常见DNS服务)
-            cat > "$temp_config.https_dns_rule" << EOL
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "port": 443,
-  "domain": [
-    "dns.google",
-    "cloudflare-dns.com",
-    "mozilla.cloudflare-dns.com",
-    "family.cloudflare-dns.com",
-    "dns.quad9.net",
-    "dns.adguard.com",
-    "dns-family.adguard.com",
-    "doh.dns.sb",
-    "dns.nextdns.io"
-  ],
-  "outboundTag": "dns-out"
-}
-EOL
-
-            # 添加DNS路由规则 - DoT DNS (端口853)
-            cat > "$temp_config.dot_dns_rule" << EOL
-{
-  "type": "field",
-  "inboundTag": ["inbound-${port}"],
-  "port": 853,
-  "network": "tcp",
-  "outboundTag": "dns-out"
-}
-EOL
-            
-            # 添加各种DNS路由规则
-            jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
-            
-            jq ".routing.rules += [$(cat "$temp_config.https_dns_rule")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
-            
-            jq ".routing.rules += [$(cat "$temp_config.dot_dns_rule")]" "$temp_config" > "$temp_config.new"
-            mv "$temp_config.new" "$temp_config"
+  \"type\": \"field\",
+  \"inboundTag\": [\"inbound-${port}\"],
+  \"outboundTag\": \"${socks5_tag}\"
+}")
         fi
+    done
+    
+    # 添加DNS规则（普通DNS - 端口53）
+    local inbound_tags_json=$(IFS=, ; echo "[\"${all_inbound_tags[*]}\"]" | sed 's/,/","/g')
+    
+    cat > "$temp_config.dns_rule" << EOL
+{
+  "type": "field",
+  "inboundTag": ${inbound_tags_json},
+  "port": 53,
+  "outboundTag": "dns-out"
+}
+EOL
+    
+    # 使用geosite形式添加DNS规则
+    cat > "$temp_config.geosite_dns_rule" << EOL
+{
+  "type": "field",
+  "inboundTag": ${inbound_tags_json},
+  "domain": [
+    "geosite:dns"
+  ],
+  "outboundTag": "dns-out"
+}
+EOL
+    
+    # 添加DoT DNS规则（端口853）
+    cat > "$temp_config.dot_dns_rule" << EOL
+{
+  "type": "field",
+  "inboundTag": ${inbound_tags_json},
+  "port": 853,
+  "network": "tcp",
+  "outboundTag": "dns-out"
+}
+EOL
+    
+    # 添加所有DNS路由规则
+    jq ".routing.rules += [$(cat "$temp_config.dns_rule")]" "$temp_config" > "$temp_config.new"
+    mv "$temp_config.new" "$temp_config"
+    
+    jq ".routing.rules += [$(cat "$temp_config.geosite_dns_rule")]" "$temp_config" > "$temp_config.new"
+    mv "$temp_config.new" "$temp_config"
+    
+    jq ".routing.rules += [$(cat "$temp_config.dot_dns_rule")]" "$temp_config" > "$temp_config.new"
+    mv "$temp_config.new" "$temp_config"
+    
+    # 添加所有SOCKS5路由规则
+    for rule in "${socks5_rules[@]}"; do
+        echo "$rule" > "$temp_config.rule"
+        jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
+        mv "$temp_config.new" "$temp_config"
     done
     
     # 应用新配置
@@ -705,10 +658,11 @@ EOL
     chmod 644 "$CONFIG_FILE"
     
     # 清理临时文件
-    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.https_dns_rule" "$temp_config.dot_dns_rule" "$temp_config.new" 2>/dev/null
+    rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.dns_rule" "$temp_config.geosite_dns_rule" "$temp_config.dot_dns_rule" "$temp_config.new" 2>/dev/null
 
     log_info "配置文件已更新"
 }
+
 
 # 检查Xray服务状态
 check_xray_service() {
