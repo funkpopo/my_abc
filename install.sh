@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.103"
+VERSION="1.2.104"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -633,7 +633,26 @@ EOL
   "type": "field",
   "inboundTag": [${all_inbound_tags}],
   "domain": [
-    "geosite:dns"
+    "dns.google",
+    "dns.google.com",
+    "8.8.8.8.dns.google",
+    "8.8.4.4.dns.google",
+    "dns64.dns.google",
+    "dns.quad9.net",
+    "cloudflare-dns.com",
+    "one.one.one.one",
+    "1dot1dot1dot1.cloudflare-dns.com",
+    "mozilla.cloudflare-dns.com",
+    "security.cloudflare-dns.com",
+    "family.cloudflare-dns.com",
+    "dns.cloudflare.com",
+    "doh.dns.sb",
+    "doh.opendns.com",
+    "doh.familyshield.opendns.com",
+    "dns.adguard.com",
+    "dns-family.adguard.com",
+    "dns-unfiltered.adguard.com",
+    "dns.google.cn"
   ],
   "outboundTag": "dns-out"
 }
