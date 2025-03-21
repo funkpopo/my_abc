@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.2.99"
+VERSION="1.2.100"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -437,8 +437,7 @@ update_config_file() {
       "tcp://9.9.9.9",
       "tcp://149.112.112.112",
       "tcp://208.67.222.222",
-      "tcp://208.67.220.220",
-      "localhost"
+      "tcp://208.67.220.220"
     ],
     "queryStrategy": "UseIPv4",
     "disableCache": true,
