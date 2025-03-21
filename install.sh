@@ -412,13 +412,7 @@ delete_port_info() {
     log_info "删除端口 $port 配置"
 }
 
-# 更新Xray配置文件
-update_config_file() {
-    # 备份当前配置
-    if [[ -f "$CONFIG_FILE" ]]; then
-        cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-    fi
-    
+
 # 更新Xray配置文件
 update_config_file() {
     # 备份当前配置
@@ -609,10 +603,26 @@ EOL
         fi
     done
     
-    # 如果有任何入站端口
+    # 添加DNS规则
+    # 检查是否有入站端口
     if [ ${#all_inbound_tags[@]} -gt 0 ]; then
         # 格式化入站标签为JSON数组
-        local inbound_tags_json=$(IFS=, ; echo "[\"${all_inbound_tags[*]}\"]" | sed 's/,/","/g')
+        # 修复可能的语法错误，确保正确处理数组转换
+        local inbound_tags_json
+        if [ ${#all_inbound_tags[@]} -eq 1 ]; then
+            # 只有一个标签时
+            inbound_tags_json="[\"${all_inbound_tags[0]}\"]"
+        else
+            # 多个标签时，使用更安全的方式连接
+            inbound_tags_json="["
+            for i in "${!all_inbound_tags[@]}"; do
+                if [ $i -gt 0 ]; then
+                    inbound_tags_json="${inbound_tags_json},"
+                fi
+                inbound_tags_json="${inbound_tags_json}\"${all_inbound_tags[$i]}\""
+            done
+            inbound_tags_json="${inbound_tags_json}]"
+        fi
         
         # 添加DNS规则（普通DNS - 端口53）
         cat > "$temp_config.dns_rule" << EOL
@@ -674,6 +684,7 @@ EOL
 
     log_info "配置文件已更新"
 }
+
 
 
 # 检查Xray服务状态
