@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.94"
+VERSION="1.3.95"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -1438,7 +1438,9 @@ modify_port_configuration() {
     local selected_port_info
     local port
     
-    while true; do
+    # 使用变量控制循环退出而不是break
+    local selected=false
+    while ! $selected; do
         read -p "$(echo -e "请选择要修改的配置序号 [${green}1-$port_count${none}]: ")" port_index
         
         if [[ -z "$port_index" ]] || ! [[ "$port_index" =~ ^[0-9]+$ ]] || [[ "$port_index" -lt 1 ]] || [[ "$port_index" -gt "$port_count" ]]; then
@@ -1452,11 +1454,12 @@ modify_port_configuration() {
         
         echo
         echo -e "$yellow 正在修改端口 ${cyan}$port${none} 的配置 $none"
-        break
+        selected=true
     done
     
     # 修改菜单
-    while true; do
+    local exit_menu=false
+    while ! $exit_menu; do
         echo "----------------------------------------------------------------"
         echo -e "  ${green}1.${none} 修改UUID"
         echo -e "  ${green}2.${none} 修改域名(SNI)"
@@ -1494,7 +1497,7 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
-                    return
+                    exit_menu=true
                 fi
                 ;;
                 
@@ -1523,7 +1526,7 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
-                    return
+                    exit_menu=true
                 fi
                 ;;
                 
@@ -1552,7 +1555,7 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
-                    return
+                    exit_menu=true
                 fi
                 ;;
                 
@@ -1581,7 +1584,7 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
-                    return
+                    exit_menu=true
                 fi
                 ;;
                 
@@ -1610,12 +1613,12 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
-                    return
+                    exit_menu=true
                 fi
                 ;;
                 
             6)
-                return
+                exit_menu=true
                 ;;
                 
             *)
