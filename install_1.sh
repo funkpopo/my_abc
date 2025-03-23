@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.9"
+VERSION="1.3.91"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -1899,7 +1899,7 @@ modify_port_socks5() {
                 fi
             fi
         fi
-    else {
+    else
         echo -e "当前状态: ${red}未启用${none}"
         echo
         echo -e "是否要${green}启用${none} SOCKS5代理?"
@@ -1909,7 +1909,7 @@ modify_port_socks5() {
             # 启用SOCKS5
             configure_socks5_for_port "$port"
         fi
-    }
+    fi
     
     # 更新Xray配置
     update_config_file
