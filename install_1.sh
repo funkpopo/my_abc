@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.95"
+VERSION="1.3.96"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -367,27 +367,149 @@ set_port_socks5_config() {
     local socks5_pass=$7
     local udp_over_tcp=$8
     
+    # 检查端口是否存在
+    if ! check_port_exists "$port"; then
+        echo -e "${red}错误: 端口 $port 不存在于配置中${none}"
+        log_error "尝试设置不存在的端口 $port 的SOCKS5配置"
+        return 1
+    fi
+    
+    # 获取当前端口信息
+    local port_info=$(get_port_info "$port")
+    
     # 创建SOCKS5配置对象
     local socks5_config
     if [[ "$enabled" == "y" ]]; then
+        # 检查SOCKS5地址和端口的有效性
+        if [[ -z "$socks5_address" ]]; then
+            echo -e "${red}错误: SOCKS5地址不能为空${none}"
+            log_error "SOCKS5地址为空 (端口: $port)"
+            return 1
+        fi
+        
+        if [[ -z "$socks5_port" ]] || ! [[ "$socks5_port" =~ ^[0-9]+$ ]] || [[ "$socks5_port" -lt 1 ]] || [[ "$socks5_port" -gt 65535 ]]; then
+            echo -e "${red}错误: SOCKS5端口无效${none}"
+            log_error "SOCKS5端口无效: $socks5_port (端口: $port)"
+            return 1
+        fi
+        
+        # 转换布尔值
+        local auth_bool=$([ "$auth_needed" == "y" ] && echo "true" || echo "false")
+        local udp_bool=$([ "$udp_over_tcp" == "y" ] && echo "true" || echo "false")
+        
+        # 如果需要认证但用户名为空，设置默认用户名
+        if [[ "$auth_bool" == "true" && -z "$socks5_user" ]]; then
+            socks5_user="user"
+            echo -e "${yellow}注意: SOCKS5用户名为空，已设置为默认值 'user'${none}"
+            log_warn "SOCKS5用户名为空，设置为默认值 (端口: $port)"
+        fi
+        
+        # 创建SOCKS5配置JSON
         socks5_config="{
             \"enabled\": true,
             \"address\": \"$socks5_address\",
             \"port\": $socks5_port,
-            \"auth_needed\": $([[ "$auth_needed" == "y" ]] && echo "true" || echo "false"),
+            \"auth_needed\": $auth_bool,
             \"username\": \"$socks5_user\",
             \"password\": \"$socks5_pass\",
-            \"udp_over_tcp\": $([[ "$udp_over_tcp" == "y" ]] && echo "true" || echo "false")
+            \"udp_over_tcp\": $udp_bool
         }"
+        
+        log_info "设置端口 $port 的SOCKS5代理配置: 启用, 地址=$socks5_address, 端口=$socks5_port, 认证=$auth_bool, UDP转发=$udp_bool"
     else
         socks5_config="null"
+        log_info "禁用端口 $port 的SOCKS5代理配置"
     fi
     
     # 更新端口的SOCKS5配置
-    jq "(.ports[] | select(.port == $port)) |= (.socks5 = $socks5_config)" "$PORT_INFO_FILE" > "${PORT_INFO_FILE}.tmp"
-    mv "${PORT_INFO_FILE}.tmp" "$PORT_INFO_FILE"
+    local temp_file=$(mktemp)
+    jq "(.ports[] | select(.port == $port)) |= (.socks5 = $socks5_config)" "$PORT_INFO_FILE" > "$temp_file"
+    
+    # 检查jq是否成功执行
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}错误: 更新JSON配置失败${none}"
+        log_error "jq更新JSON失败 (端口: $port)"
+        rm -f "$temp_file"
+        return 1
+    fi
+    
+    # 应用更新
+    mv "$temp_file" "$PORT_INFO_FILE"
     chmod 600 "$PORT_INFO_FILE"
-    log_info "设置端口 $port 的SOCKS5代理配置: 启用=$enabled"
+    
+    # 处理与HAProxy的关联
+    if [[ "$enabled" == "y" ]]; then
+        # 检查是否有已存在的HAProxy配置
+        local haproxy_config=$(echo "$port_info" | jq -r '.haproxy')
+        
+        if [[ "$haproxy_config" != "null" && "$(echo "$haproxy_config" | jq -r '.enabled // false')" == "true" ]]; then
+            # 现有HAProxy配置，询问是否更新
+            echo -e "${yellow}发现端口 $port 已有HAProxy配置。是否需要更新?${none}"
+            echo -e "当前HAProxy配置:"
+            local haproxy_port=$(echo "$haproxy_config" | jq -r '.port')
+            local haproxy_threads=$(echo "$haproxy_config" | jq -r '.threads')
+            local haproxy_maxconn=$(echo "$haproxy_config" | jq -r '.maxconn')
+            
+            echo -e "  端口: ${cyan}$haproxy_port${none}"
+            echo -e "  线程数: ${cyan}$haproxy_threads${none}"
+            echo -e "  最大连接数: ${cyan}$haproxy_maxconn${none}"
+            
+            read -p "$(echo -e "是否更新HAProxy配置? (y/n, 默认: ${cyan}n${none}): ")" update_haproxy
+            
+            if [[ "$update_haproxy" == "y" ]]; then
+                # 调用HAProxy配置函数
+                set_port_haproxy_config "$port" "y" "$haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
+                update_haproxy_config
+            fi
+        else
+            # 没有现有HAProxy配置，询问是否添加
+            echo -e "${yellow}推荐为SOCKS5代理配置HAProxy以提高性能。是否添加HAProxy配置?${none}"
+            read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" add_haproxy
+            [ -z "$add_haproxy" ] && add_haproxy="y"
+            
+            if [[ "$add_haproxy" == "y" ]]; then
+                # 默认HAProxy端口为VLESS端口+1
+                local default_haproxy_port=$((port + 1))
+                
+                # 检查端口是否被占用
+                while lsof -i:"$default_haproxy_port" >/dev/null 2>&1; do
+                    echo -e "${yellow}端口 $default_haproxy_port 已被占用，自动选择下一个可用端口${none}"
+                    default_haproxy_port=$((default_haproxy_port + 1))
+                done
+                
+                # 使用默认线程数和最大连接数
+                local haproxy_threads=8
+                local haproxy_maxconn=200
+                
+                # 保存HAProxy配置
+                set_port_haproxy_config "$port" "y" "$default_haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
+                update_haproxy_config
+                
+                echo -e "${green}HAProxy已配置，端口: $default_haproxy_port, 线程数: $haproxy_threads, 最大连接数: $haproxy_maxconn${none}"
+                log_info "为端口 $port 自动配置HAProxy，端口: $default_haproxy_port"
+            fi
+        fi
+    else
+        # 如果禁用SOCKS5，检查是否需要禁用HAProxy
+        local haproxy_config=$(echo "$port_info" | jq -r '.haproxy')
+        
+        if [[ "$haproxy_config" != "null" && "$(echo "$haproxy_config" | jq -r '.enabled // false')" == "true" ]]; then
+            echo -e "${yellow}SOCKS5已禁用，但发现HAProxy配置。是否同时禁用HAProxy?${none}"
+            read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" disable_haproxy
+            [ -z "$disable_haproxy" ] && disable_haproxy="y"
+            
+            if [[ "$disable_haproxy" == "y" ]]; then
+                # 禁用HAProxy配置
+                set_port_haproxy_config "$port" "n" "" "" ""
+                update_haproxy_config
+                
+                echo -e "${green}HAProxy配置已禁用${none}"
+                log_info "禁用端口 $port 的HAProxy配置"
+            fi
+        fi
+    fi
+    
+    return 0
 }
 
 # 获取特定端口的配置信息
@@ -651,25 +773,37 @@ list_port_configurations() {
         # 截取UUID的开头和结尾部分，中间用省略号
         local uuid_short="${uuid:0:8}...${uuid:24}"
         local domain=$(echo "$port_info" | jq -r '.domain')
-        local socks5_enabled=$(echo "$port_info" | jq -r '.socks5.enabled // false')
         
-        if [[ "$socks5_enabled" == "true" ]]; then
-            local socks5_address=$(echo "$port_info" | jq -r '.socks5.address')
-            local socks5_port=$(echo "$port_info" | jq -r '.socks5.port')
-            socks5_status="${green}启用 (${socks5_address}:${socks5_port})${none}"
-        else
-            socks5_status="${red}禁用${none}"
+        # 显示SOCKS5状态
+        local socks5_status="${red}禁用${none}"
+        if $(echo "$port_info" | jq 'has("socks5")') && [[ "$(echo "$port_info" | jq -r '.socks5 != null')" == "true" ]]; then
+            local socks5_enabled=$(echo "$port_info" | jq -r '.socks5.enabled // false')
+            if [[ "$socks5_enabled" == "true" ]]; then
+                local socks5_address=$(echo "$port_info" | jq -r '.socks5.address')
+                local socks5_port=$(echo "$port_info" | jq -r '.socks5.port')
+                socks5_status="${green}启用 (${socks5_address}:${socks5_port})${none}"
+            fi
         fi
         
         # 显示HAProxy状态
-        local haproxy_enabled=$(echo "$port_info" | jq -r '.haproxy.enabled // false')
-        if [[ "$haproxy_enabled" == "true" ]]; then
-            local haproxy_port=$(echo "$port_info" | jq -r '.haproxy.port')
-            local haproxy_threads=$(echo "$port_info" | jq -r '.haproxy.threads')
-            local haproxy_maxconn=$(echo "$port_info" | jq -r '.haproxy.maxconn')
-            haproxy_status="${green}启用 (端口:${haproxy_port}, 线程:${haproxy_threads}, 最大连接:${haproxy_maxconn})${none}"
-        else
-            haproxy_status="${red}禁用${none}"
+        local haproxy_status="${red}禁用${none}"
+        if $(echo "$port_info" | jq 'has("haproxy")') && [[ "$(echo "$port_info" | jq -r '.haproxy != null')" == "true" ]]; then
+            local haproxy_enabled=$(echo "$port_info" | jq -r '.haproxy.enabled // false')
+            if [[ "$haproxy_enabled" == "true" ]]; then
+                local haproxy_port=$(echo "$port_info" | jq -r '.haproxy.port')
+                local haproxy_threads=$(echo "$port_info" | jq -r '.haproxy.threads')
+                local haproxy_maxconn=$(echo "$port_info" | jq -r '.haproxy.maxconn')
+                haproxy_status="${green}启用 (端口:${haproxy_port}, 线程:${haproxy_threads}, 最大连接:${haproxy_maxconn})${none}"
+                
+                # 验证HAProxy配置文件是否与端口信息一致
+                if [[ -f "$HAPROXY_CONFIG" ]]; then
+                    if ! grep -q "bind \*:$haproxy_port" "$HAPROXY_CONFIG"; then
+                        haproxy_status="${yellow}配置不一致! (端口:${haproxy_port})${none}"
+                    fi
+                else
+                    haproxy_status="${yellow}配置文件丢失${none}"
+                fi
+            fi
         fi
         
         echo -e "${green}$index${none}    ${cyan}$port${none}    ${yellow}$uuid_short${none}    ${magenta}$domain${none}    ${socks5_status}    ${haproxy_status}"
@@ -681,10 +815,57 @@ list_port_configurations() {
     # 如果HAProxy服务运行中，显示HAProxy状态
     if systemctl is-active --quiet haproxy; then
         echo -e "${green}HAProxy服务状态: 运行中${none}"
+        
+        # 显示HAProxy的监听端口与配置文件比对
+        echo -e "${yellow}HAProxy监听端口:${none}"
+        local listen_ports=$(grep -E "bind \*:[0-9]+" "$HAPROXY_CONFIG" | grep -oE "[0-9]+" | sort -n)
+        if [[ -n "$listen_ports" ]]; then
+            echo "$listen_ports" | while read -r hport; do
+                local is_configured=false
+                jq -c '.ports[] | select(.haproxy != null and .haproxy.enabled == true)' "$PORT_INFO_FILE" | while read -r p_info; do
+                    local hp=$(echo "$p_info" | jq -r '.haproxy.port')
+                    if [[ "$hp" -eq "$hport" ]]; then
+                        local xport=$(echo "$p_info" | jq -r '.port')
+                        is_configured=true
+                        echo -e "  ${green}$hport${none} -> 对应Xray端口: ${cyan}$xport${none}"
+                        break
+                    fi
+                done
+                
+                if ! $is_configured; then
+                    echo -e "  ${red}$hport${none} -> 未找到对应的Xray端口配置!"
+                fi
+            done
+        else
+            echo -e "  ${red}未找到HAProxy监听端口配置${none}"
+        fi
     else
         echo -e "${red}HAProxy服务状态: 未运行${none}"
     fi
     
+    # 检查是否有Xray配置的端口没有对应的HAProxy配置
+    echo -e "${yellow}检查配置完整性:${none}"
+    local missing_haproxy=0
+    jq -c '.ports[] | select(.socks5 != null and .socks5.enabled == true)' "$PORT_INFO_FILE" | while read -r port_info; do
+        local port=$(echo "$port_info" | jq -r '.port')
+        local has_haproxy=false
+        
+        if $(echo "$port_info" | jq 'has("haproxy")') && [[ "$(echo "$port_info" | jq -r '.haproxy != null')" == "true" ]]; then
+            local haproxy_enabled=$(echo "$port_info" | jq -r '.haproxy.enabled // false')
+            if [[ "$haproxy_enabled" == "true" ]]; then
+                has_haproxy=true
+            fi
+        fi
+        
+        if ! $has_haproxy; then
+            echo -e "  ${red}端口 $port 配置了SOCKS5但缺少HAProxy配置${none}"
+            missing_haproxy=$((missing_haproxy + 1))
+        fi
+    done
+    
+    if [[ $missing_haproxy -eq 0 ]]; then
+        echo -e "  ${green}所有SOCKS5配置都有对应的HAProxy配置${none}"
+    fi
 }
 
 # 备份当前所有配置
@@ -1133,11 +1314,7 @@ generate_connection_info() {
                 echo -e "${cyan}${socks5_url}${none}"
             fi
             
-            # 为SOCKS5链接生成二维码
-            echo
-            echo "SOCKS5 二维码:"
-            qrencode -t UTF8 "$socks5_url"
-            qrencode -t ANSI "$socks5_url"
+            
         fi
     fi
     
@@ -1351,21 +1528,21 @@ update_haproxy_config() {
         cp "$HAPROXY_CONFIG" "${HAPROXY_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
     fi
     
-    # 创建基本配置
-    # 找到启用HAProxy的配置中最大的线程数
-    local max_threads=8
-    jq -c '.ports[] | select(.haproxy != null and .haproxy.enabled == true)' "$PORT_INFO_FILE" | while read -r port_info; do
-        local threads=$(echo "$port_info" | jq -r '.haproxy.threads')
-        if [[ $threads -gt $max_threads ]]; then
-            max_threads=$threads
-        fi
-    done
+    # 检查是否有任何端口启用了HAProxy
+    local has_enabled_haproxy=false
+    if jq -e '.ports[] | select(.haproxy != null and .haproxy.enabled == true)' "$PORT_INFO_FILE" > /dev/null; then
+        has_enabled_haproxy=true
+    fi
     
-    cat > "$HAPROXY_CONFIG" << EOL
+    # 如果没有启用的HAProxy配置，创建一个最小配置
+    if ! $has_enabled_haproxy; then
+        echo -e "${yellow}未发现启用的HAProxy配置，创建最小配置...${none}"
+        
+        cat > "$HAPROXY_CONFIG" << EOL
 global
     maxconn 4000
-    nbproc 1          # 只使用单进程
-    nbthread $max_threads        # 使用所有配置中最大的线程数
+    nbproc 1
+    nbthread 4
     tune.bufsize 32768
     tune.maxrewrite 1024
 
@@ -1378,42 +1555,242 @@ defaults
     option tcp-smart-connect
     option tcplog
 
+# 无活动的SOCKS5代理配置
+listen stats
+    bind *:1080
+    stats enable
+    stats uri /
+    stats refresh 10s
+    stats admin if TRUE
+EOL
+        
+        log_info "创建了最小HAProxy配置（无活动代理）"
+        
+        # 检查并启动HAProxy服务
+        if ! systemctl is-active --quiet haproxy; then
+            systemctl start haproxy
+            if systemctl is-active --quiet haproxy; then
+                echo -e "${green}HAProxy服务已启动${none}"
+                log_info "HAProxy服务已启动"
+            else
+                echo -e "${red}HAProxy服务启动失败${none}"
+                log_error "HAProxy服务启动失败"
+            fi
+        fi
+        
+        return 0
+    fi
+    
+    # 创建基本配置
+    # 找到启用HAProxy的配置中最大的线程数
+    local max_threads=8
+    jq -c '.ports[] | select(.haproxy != null and .haproxy.enabled == true)' "$PORT_INFO_FILE" | while read -r port_info; do
+        local threads=$(echo "$port_info" | jq -r '.haproxy.threads')
+        if [[ $threads -gt $max_threads ]]; then
+            max_threads=$threads
+        fi
+    done
+    
+    # 找到最大连接数配置
+    local max_connections=4000
+    jq -c '.ports[] | select(.haproxy != null and .haproxy.enabled == true)' "$PORT_INFO_FILE" | while read -r port_info; do
+        local connections=$(echo "$port_info" | jq -r '.haproxy.maxconn')
+        local total_connections=$((connections * 2))
+        if [[ $total_connections -gt $max_connections ]]; then
+            max_connections=$total_connections
+        fi
+    done
+    
+    cat > "$HAPROXY_CONFIG" << EOL
+global
+    maxconn $max_connections
+    nbproc 1          # 只使用单进程
+    nbthread $max_threads        # 使用所有配置中最大的线程数
+    tune.bufsize 32768
+    tune.maxrewrite 1024
+    log /dev/log local0 info
+    log /dev/log local1 notice
+
+defaults
+    mode tcp
+    timeout connect 5s
+    timeout client 50s
+    timeout server 50s
+    option tcp-smart-accept
+    option tcp-smart-connect
+    option tcplog
+    log global
+
 EOL
     
     # 添加每个启用了HAProxy的端口配置
+    local haproxy_ports_added=()
+    local config_errors=0
+    
     jq -c '.ports[] | select(.haproxy != null and .haproxy.enabled == true)' "$PORT_INFO_FILE" | while read -r port_info; do
         local port=$(echo "$port_info" | jq -r '.port')
         local haproxy_port=$(echo "$port_info" | jq -r '.haproxy.port')
         local haproxy_maxconn=$(echo "$port_info" | jq -r '.haproxy.maxconn')
-        local socks5_address=$(echo "$port_info" | jq -r '.socks5.address')
-        local socks5_port=$(echo "$port_info" | jq -r '.socks5.port')
         
+        # 检查SOCKS5配置
+        local has_socks5=false
+        local socks5_address=""
+        local socks5_port=""
+        
+        if [[ "$(echo "$port_info" | jq -r 'has("socks5")')" == "true" && "$(echo "$port_info" | jq -r '.socks5 != null')" == "true" ]]; then
+            local socks5_enabled=$(echo "$port_info" | jq -r '.socks5.enabled // false')
+            if [[ "$socks5_enabled" == "true" ]]; then
+                has_socks5=true
+                socks5_address=$(echo "$port_info" | jq -r '.socks5.address')
+                socks5_port=$(echo "$port_info" | jq -r '.socks5.port')
+            fi
+        fi
+        
+        # 检查HAProxy端口是否已添加
+        if [[ " ${haproxy_ports_added[@]} " =~ " ${haproxy_port} " ]]; then
+            echo -e "${red}端口 $haproxy_port 在HAProxy配置中重复出现，跳过添加${none}"
+            log_error "HAProxy端口 $haproxy_port 配置重复 (Xray端口: $port)"
+            config_errors=$((config_errors + 1))
+            continue
+        fi
+        
+        # 如果没有对应的SOCKS5配置，记录警告
+        if ! $has_socks5; then
+            echo -e "${yellow}警告: 端口 $port 的HAProxy配置没有对应的SOCKS5配置${none}"
+            log_warn "端口 $port 的HAProxy配置没有对应的SOCKS5配置"
+            config_errors=$((config_errors + 1))
+            continue
+        fi
+        
+        # 添加到HAProxy配置
         cat >> "$HAPROXY_CONFIG" << EOL
 frontend socks_front_$port
     bind *:$haproxy_port
     default_backend socks_servers_$port
+    description "Frontend for Xray port $port"
 
 backend socks_servers_$port
-    server socks1 $socks5_address:$socks5_port maxconn $haproxy_maxconn check inter 5000 rise 2 fall 3
+    server socks_$port $socks5_address:$socks5_port maxconn $haproxy_maxconn check inter 5000 rise 2 fall 3
+    description "Backend for SOCKS5 proxy $socks5_address:$socks5_port"
 
 EOL
+        
+        # 记录已添加的HAProxy端口
+        haproxy_ports_added+=("$haproxy_port")
+        echo -e "${green}已添加HAProxy配置：端口 $haproxy_port -> $socks5_address:$socks5_port (Xray端口: $port)${none}"
+        log_info "已添加HAProxy配置：端口 $haproxy_port -> $socks5_address:$socks5_port (Xray端口: $port)"
     done
     
-    # 重启HAProxy服务
-    if systemctl is-active --quiet haproxy; then
-        systemctl restart haproxy
+    # 添加统计页面
+    cat >> "$HAPROXY_CONFIG" << EOL
+listen stats
+    bind *:1080
+    stats enable
+    stats uri /
+    stats refresh 10s
+    stats admin if TRUE
+EOL
+    
+    # 验证HAProxy配置
+    echo -e "${yellow}验证HAProxy配置...${none}"
+    if haproxy -c -f "$HAPROXY_CONFIG" &> /dev/null; then
+        echo -e "${green}HAProxy配置验证通过${none}"
+        log_info "HAProxy配置验证通过"
     else
-        systemctl start haproxy
+        echo -e "${red}HAProxy配置验证失败！${none}"
+        echo -e "${yellow}详细错误信息：${none}"
+        haproxy -c -f "$HAPROXY_CONFIG"
+        log_error "HAProxy配置验证失败"
+        
+        # 恢复备份
+        local latest_backup=$(ls -t "${HAPROXY_CONFIG}.bak."* 2>/dev/null | head -n1)
+        if [[ -n "$latest_backup" ]]; then
+            echo -e "${yellow}正在恢复备份配置: $latest_backup${none}"
+            cp "$latest_backup" "$HAPROXY_CONFIG"
+            log_warn "已恢复HAProxy配置备份: $latest_backup"
+        else
+            echo -e "${red}没有可用的备份配置，创建最小配置${none}"
+            cat > "$HAPROXY_CONFIG" << EOL
+global
+    maxconn 4000
+    nbproc 1
+    nbthread 4
+
+defaults
+    mode tcp
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+EOL
+            log_warn "已创建最小HAProxy配置"
+        fi
+        
+        config_errors=$((config_errors + 1))
     fi
     
-    # 检查HAProxy服务是否正常运行
-    sleep 2
-    if systemctl is-active --quiet haproxy; then
-        log_info "HAProxy服务重启成功"
+    # 重启HAProxy服务
+    if [[ $config_errors -eq 0 ]]; then
+        echo -e "${yellow}重启HAProxy服务...${none}"
+        if systemctl restart haproxy; then
+            echo -e "${green}HAProxy服务重启成功${none}"
+            log_info "HAProxy服务重启成功"
+            
+            # 检查HAProxy服务状态
+            sleep 2
+            if systemctl is-active --quiet haproxy; then
+                echo -e "${green}HAProxy服务运行中${none}"
+                
+                # 检查所有配置的端口是否正在监听
+                echo -e "${yellow}检查HAProxy端口...${none}"
+                for port in "${haproxy_ports_added[@]}"; do
+                    if lsof -i:"$port" | grep -q "haproxy"; then
+                        echo -e "  ${green}端口 $port 正在监听${none}"
+                    else
+                        echo -e "  ${red}端口 $port 未监听!${none}"
+                        log_error "HAProxy端口 $port 未监听"
+                    fi
+                done
+            else
+                echo -e "${red}HAProxy服务未运行!${none}"
+                log_error "HAProxy服务未运行"
+            fi
+        else
+            echo -e "${red}HAProxy服务重启失败!${none}"
+            log_error "HAProxy服务重启失败"
+            
+            # 尝试启动HAProxy服务
+            echo -e "${yellow}尝试启动HAProxy服务...${none}"
+            if systemctl start haproxy; then
+                echo -e "${green}HAProxy服务启动成功${none}"
+                log_info "HAProxy服务启动成功"
+            else
+                echo -e "${red}HAProxy服务启动失败!${none}"
+                log_error "HAProxy服务启动失败"
+                
+                # 查看错误日志
+                echo -e "${yellow}HAProxy错误日志:${none}"
+                journalctl -u haproxy -n 20 --no-pager
+            fi
+        fi
     else
-        log_error "HAProxy服务启动失败"
-        echo -e "${red}HAProxy服务启动失败，请检查配置${none}"
+        echo -e "${red}由于配置错误，跳过重启HAProxy服务${none}"
+        log_error "由于配置错误，跳过重启HAProxy服务"
     fi
+    
+    # 检查并修复权限
+    chmod 644 "$HAPROXY_CONFIG"
+    
+    # 如果有配置错误，建议修复
+    if [[ $config_errors -gt 0 ]]; then
+        echo
+        echo -e "${red}发现 $config_errors 个配置问题，建议修复:${none}"
+        echo -e "  ${yellow}1. 检查端口配置的一致性${none}"
+        echo -e "  ${yellow}2. 确保每个HAProxy配置都有对应的SOCKS5配置${none}"
+        echo -e "  ${yellow}3. 避免HAProxy端口重复${none}"
+        echo
+    fi
+    
+    return $config_errors
 }
 
 
@@ -1497,6 +1874,32 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
+                    # 获取最新的端口信息
+                    local updated_port_info=$(get_port_info "$port")
+                    local uuid=$(echo "$updated_port_info" | jq -r '.uuid')
+                    local public_key=$(echo "$updated_port_info" | jq -r '.public_key')
+                    local shortid=$(echo "$updated_port_info" | jq -r '.shortid')
+                    local domain=$(echo "$updated_port_info" | jq -r '.domain')
+                    
+                    # 获取本机IP
+                    if ! get_local_ips; then
+                        echo -e "${red}获取IP地址失败!${none}"
+                    else
+                        # 根据当前网络环境选择IP
+                        local ip
+                        local netstack
+                        if [[ -n "$IPv4" ]]; then
+                            ip=$IPv4
+                            netstack=4
+                        elif [[ -n "$IPv6" ]]; then
+                            ip=$IPv6
+                            netstack=6
+                        fi
+                        
+                        # 显示配置信息和二维码
+                        generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
+                    fi
+                    
                     exit_menu=true
                 fi
                 ;;
@@ -1526,6 +1929,32 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
+                    # 获取最新的端口信息
+                    local updated_port_info=$(get_port_info "$port")
+                    local uuid=$(echo "$updated_port_info" | jq -r '.uuid')
+                    local public_key=$(echo "$updated_port_info" | jq -r '.public_key')
+                    local shortid=$(echo "$updated_port_info" | jq -r '.shortid')
+                    local domain=$(echo "$updated_port_info" | jq -r '.domain')
+                    
+                    # 获取本机IP
+                    if ! get_local_ips; then
+                        echo -e "${red}获取IP地址失败!${none}"
+                    else
+                        # 根据当前网络环境选择IP
+                        local ip
+                        local netstack
+                        if [[ -n "$IPv4" ]]; then
+                            ip=$IPv4
+                            netstack=4
+                        elif [[ -n "$IPv6" ]]; then
+                            ip=$IPv6
+                            netstack=6
+                        fi
+                        
+                        # 显示配置信息和二维码
+                        generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
+                    fi
+                    
                     exit_menu=true
                 fi
                 ;;
@@ -1555,6 +1984,32 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
+                    # 获取最新的端口信息
+                    local updated_port_info=$(get_port_info "$port")
+                    local uuid=$(echo "$updated_port_info" | jq -r '.uuid')
+                    local public_key=$(echo "$updated_port_info" | jq -r '.public_key')
+                    local shortid=$(echo "$updated_port_info" | jq -r '.shortid')
+                    local domain=$(echo "$updated_port_info" | jq -r '.domain')
+                    
+                    # 获取本机IP
+                    if ! get_local_ips; then
+                        echo -e "${red}获取IP地址失败!${none}"
+                    else
+                        # 根据当前网络环境选择IP
+                        local ip
+                        local netstack
+                        if [[ -n "$IPv4" ]]; then
+                            ip=$IPv4
+                            netstack=4
+                        elif [[ -n "$IPv6" ]]; then
+                            ip=$IPv6
+                            netstack=6
+                        fi
+                        
+                        # 显示配置信息和二维码
+                        generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
+                    fi
+                    
                     exit_menu=true
                 fi
                 ;;
@@ -1584,6 +2039,32 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
+                    # 获取最新的端口信息
+                    local updated_port_info=$(get_port_info "$port")
+                    local uuid=$(echo "$updated_port_info" | jq -r '.uuid')
+                    local public_key=$(echo "$updated_port_info" | jq -r '.public_key')
+                    local shortid=$(echo "$updated_port_info" | jq -r '.shortid')
+                    local domain=$(echo "$updated_port_info" | jq -r '.domain')
+                    
+                    # 获取本机IP
+                    if ! get_local_ips; then
+                        echo -e "${red}获取IP地址失败!${none}"
+                    else
+                        # 根据当前网络环境选择IP
+                        local ip
+                        local netstack
+                        if [[ -n "$IPv4" ]]; then
+                            ip=$IPv4
+                            netstack=4
+                        elif [[ -n "$IPv6" ]]; then
+                            ip=$IPv6
+                            netstack=6
+                        fi
+                        
+                        # 显示配置信息和二维码
+                        generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
+                    fi
+                    
                     exit_menu=true
                 fi
                 ;;
@@ -1613,6 +2094,32 @@ modify_port_configuration() {
                 [ -z "$continue_modify" ] && continue_modify="n"
                 
                 if [[ "$continue_modify" != "y" ]]; then
+                    # 获取最新的端口信息
+                    local updated_port_info=$(get_port_info "$port")
+                    local uuid=$(echo "$updated_port_info" | jq -r '.uuid')
+                    local public_key=$(echo "$updated_port_info" | jq -r '.public_key')
+                    local shortid=$(echo "$updated_port_info" | jq -r '.shortid')
+                    local domain=$(echo "$updated_port_info" | jq -r '.domain')
+                    
+                    # 获取本机IP
+                    if ! get_local_ips; then
+                        echo -e "${red}获取IP地址失败!${none}"
+                    else
+                        # 根据当前网络环境选择IP
+                        local ip
+                        local netstack
+                        if [[ -n "$IPv4" ]]; then
+                            ip=$IPv4
+                            netstack=4
+                        elif [[ -n "$IPv6" ]]; then
+                            ip=$IPv6
+                            netstack=6
+                        fi
+                        
+                        # 显示配置信息和二维码
+                        generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
+                    fi
+                    
                     exit_menu=true
                 fi
                 ;;
@@ -1989,8 +2496,8 @@ modify_port_socks5() {
                     [ -z "$haproxy_threads" ] && haproxy_threads=8
                     
                     # 设置HAProxy最大连接数
-                    read -p "$(echo -e "请输入 HAProxy 最大连接数 (默认: ${cyan}100${none}): ")" haproxy_maxconn
-                    [ -z "$haproxy_maxconn" ] && haproxy_maxconn=100
+                    read -p "$(echo -e "请输入 HAProxy 最大连接数 (默认: ${cyan}200${none}): ")" haproxy_maxconn
+                    [ -z "$haproxy_maxconn" ] && haproxy_maxconn=200
                     
                     # 保存HAProxy配置
                     set_port_haproxy_config "$port" "y" "$default_haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
@@ -2117,8 +2624,8 @@ modify_port_haproxy() {
             [ -z "$haproxy_threads" ] && haproxy_threads=8
             
             # 设置HAProxy最大连接数
-            read -p "$(echo -e "请输入 HAProxy 最大连接数 (默认: ${cyan}100${none}): ")" haproxy_maxconn
-            [ -z "$haproxy_maxconn" ] && haproxy_maxconn=100
+            read -p "$(echo -e "请输入 HAProxy 最大连接数 (默认: ${cyan}200${none}): ")" haproxy_maxconn
+            [ -z "$haproxy_maxconn" ] && haproxy_maxconn=200
             
             # 保存HAProxy配置
             set_port_haproxy_config "$port" "y" "$default_haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
@@ -2288,6 +2795,289 @@ uninstall_xray() {
         exit 0
     else
         show_menu
+    fi
+}
+
+
+# 检查HAProxy和SOCKS5配置一致性
+check_haproxy_socks5_consistency() {
+    echo
+    echo -e "$yellow 检查HAProxy和SOCKS5配置一致性 $none"
+    echo "----------------------------------------------------------------"
+    
+    local inconsistencies=0
+    local missing_haproxy_config=false
+    
+    # 首先检查HAProxy配置文件是否存在
+    if [[ ! -f "$HAPROXY_CONFIG" ]]; then
+        echo -e "${red}HAProxy配置文件不存在: $HAPROXY_CONFIG${none}"
+        missing_haproxy_config=true
+        inconsistencies=$((inconsistencies + 1))
+    fi
+    
+    # 检查HAProxy服务是否安装和运行
+    if ! command -v haproxy &> /dev/null; then
+        echo -e "${red}HAProxy服务未安装${none}"
+        
+        # 提示安装HAProxy
+        echo -e "${yellow}是否安装HAProxy服务?${none}"
+        read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" install_haproxy
+        [ -z "$install_haproxy" ] && install_haproxy="y"
+        
+        if [[ "$install_haproxy" == "y" ]]; then
+            echo -e "${yellow}正在安装HAProxy...${none}"
+            apt update &>/dev/null
+            apt install -y haproxy &>/dev/null
+            
+            if command -v haproxy &> /dev/null; then
+                echo -e "${green}HAProxy安装成功${none}"
+                systemctl enable haproxy &>/dev/null
+                log_info "HAProxy安装成功"
+            else
+                echo -e "${red}HAProxy安装失败${none}"
+                log_error "HAProxy安装失败"
+                return 1
+            fi
+        else
+            echo -e "${yellow}跳过安装HAProxy${none}"
+            return 1
+        fi
+    elif ! systemctl is-active --quiet haproxy; then
+        echo -e "${red}HAProxy服务未运行${none}"
+        
+        # 尝试启动HAProxy服务
+        echo -e "${yellow}是否启动HAProxy服务?${none}"
+        read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" start_haproxy
+        [ -z "$start_haproxy" ] && start_haproxy="y"
+        
+        if [[ "$start_haproxy" == "y" ]]; then
+            systemctl start haproxy
+            if systemctl is-active --quiet haproxy; then
+                echo -e "${green}HAProxy服务启动成功${none}"
+                log_info "HAProxy服务启动成功"
+            else
+                echo -e "${red}HAProxy服务启动失败${none}"
+                log_error "HAProxy服务启动失败"
+                inconsistencies=$((inconsistencies + 1))
+            fi
+        else
+            echo -e "${yellow}HAProxy服务保持未启动状态${none}"
+            inconsistencies=$((inconsistencies + 1))
+        fi
+    else
+        echo -e "${green}HAProxy服务正在运行${none}"
+    fi
+    
+    # 如果配置文件不存在，询问是否创建新的配置文件
+    if $missing_haproxy_config; then
+        echo -e "${yellow}是否自动生成HAProxy配置文件?${none}"
+        read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" create_haproxy_config
+        [ -z "$create_haproxy_config" ] && create_haproxy_config="y"
+        
+        if [[ "$create_haproxy_config" == "y" ]]; then
+            echo -e "${yellow}正在生成新的HAProxy配置文件...${none}"
+            if update_haproxy_config; then
+                echo -e "${green}HAProxy配置文件生成成功${none}"
+                missing_haproxy_config=false
+                log_info "HAProxy配置文件生成成功"
+            else
+                echo -e "${red}HAProxy配置文件生成失败${none}"
+                log_error "HAProxy配置文件生成失败"
+                return 1
+            fi
+        else
+            echo -e "${yellow}跳过生成HAProxy配置文件${none}"
+            return 1
+        fi
+    fi
+    
+    # 如果配置文件已存在，检查内容是否有效
+    if ! $missing_haproxy_config; then
+        echo -e "${yellow}验证HAProxy配置文件...${none}"
+        if haproxy -c -f "$HAPROXY_CONFIG" &> /dev/null; then
+            echo -e "${green}HAProxy配置文件有效${none}"
+        else
+            echo -e "${red}HAProxy配置文件无效${none}"
+            
+            # 提示重新生成配置
+            echo -e "${yellow}是否重新生成HAProxy配置文件?${none}"
+            read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" recreate_haproxy_config
+            [ -z "$recreate_haproxy_config" ] && recreate_haproxy_config="y"
+            
+            if [[ "$recreate_haproxy_config" == "y" ]]; then
+                echo -e "${yellow}正在重新生成HAProxy配置文件...${none}"
+                if update_haproxy_config; then
+                    echo -e "${green}HAProxy配置文件重新生成成功${none}"
+                    log_info "HAProxy配置文件重新生成成功"
+                else
+                    echo -e "${red}HAProxy配置文件重新生成失败${none}"
+                    log_error "HAProxy配置文件重新生成失败"
+                    inconsistencies=$((inconsistencies + 1))
+                fi
+            else
+                echo -e "${yellow}保留当前HAProxy配置文件${none}"
+                inconsistencies=$((inconsistencies + 1))
+            fi
+        fi
+    fi
+    
+    # 检查每个端口配置
+    echo -e "${yellow}检查端口配置...${none}"
+    
+    # 获取所有配置了SOCKS5的端口
+    local socks5_ports=()
+    jq -c '.ports[] | select(.socks5 != null and .socks5.enabled == true)' "$PORT_INFO_FILE" | while read -r port_info; do
+        local port=$(echo "$port_info" | jq -r '.port')
+        socks5_ports+=("$port")
+    done
+    
+    # 检查每个配置了SOCKS5的端口是否有对应的HAProxy配置
+    for port in "${socks5_ports[@]}"; do
+        local port_info=$(get_port_info "$port")
+        local haproxy_config=$(echo "$port_info" | jq -r '.haproxy')
+        
+        if [[ "$haproxy_config" == "null" || "$(echo "$haproxy_config" | jq -r '.enabled // false')" != "true" ]]; then
+            echo -e "${red}端口 $port 配置了SOCKS5但缺少HAProxy配置${none}"
+            
+            # 询问是否添加HAProxy配置
+            echo -e "${yellow}是否为端口 $port 添加HAProxy配置?${none}"
+            read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" add_haproxy
+            [ -z "$add_haproxy" ] && add_haproxy="y"
+            
+            if [[ "$add_haproxy" == "y" ]]; then
+                # 默认HAProxy端口为VLESS端口+1
+                local default_haproxy_port=$((port + 1))
+                
+                # 检查端口是否被占用
+                while lsof -i:"$default_haproxy_port" >/dev/null 2>&1; do
+                    echo -e "${yellow}端口 $default_haproxy_port 已被占用，自动选择下一个可用端口${none}"
+                    default_haproxy_port=$((default_haproxy_port + 1))
+                done
+                
+                # 使用默认线程数和最大连接数
+                local haproxy_threads=8
+                local haproxy_maxconn=200
+                
+                # 保存HAProxy配置
+                set_port_haproxy_config "$port" "y" "$default_haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
+                
+                echo -e "${green}端口 $port 已添加HAProxy配置 (端口: $default_haproxy_port)${none}"
+                log_info "为端口 $port 添加HAProxy配置 (端口: $default_haproxy_port)"
+            else
+                echo -e "${yellow}跳过为端口 $port 添加HAProxy配置${none}"
+                inconsistencies=$((inconsistencies + 1))
+            fi
+        fi
+    done
+    
+    # 如果有任何配置更改，更新HAProxy配置文件
+    if [[ ${#socks5_ports[@]} -gt 0 ]]; then
+        echo -e "${yellow}更新HAProxy配置文件...${none}"
+        if update_haproxy_config; then
+            echo -e "${green}HAProxy配置文件更新成功${none}"
+            log_info "HAProxy配置文件更新成功"
+        else
+            echo -e "${red}HAProxy配置文件更新失败${none}"
+            log_error "HAProxy配置文件更新失败"
+            inconsistencies=$((inconsistencies + 1))
+        fi
+    fi
+    
+    # 检查HAProxy配置文件中的端口与JSON配置的一致性
+    if [[ -f "$HAPROXY_CONFIG" ]]; then
+        echo -e "${yellow}检查HAProxy配置与JSON配置的一致性...${none}"
+        
+        # 获取HAProxy配置文件中的所有监听端口
+        local haproxy_listen_ports=$(grep -E "bind \*:[0-9]+" "$HAPROXY_CONFIG" | grep -oE "[0-9]+" | sort -n)
+        
+        # 获取JSON配置中启用的所有HAProxy端口
+        local json_haproxy_ports=()
+        jq -c '.ports[] | select(.haproxy != null and .haproxy.enabled == true)' "$PORT_INFO_FILE" | while read -r port_info; do
+            local haproxy_port=$(echo "$port_info" | jq -r '.haproxy.port')
+            json_haproxy_ports+=("$haproxy_port")
+        done
+        
+        # 检查HAProxy配置文件中的端口是否都在JSON配置中
+        for hport in $haproxy_listen_ports; do
+            # 跳过统计页面端口1080
+            if [[ "$hport" == "1080" ]]; then
+                continue
+            fi
+            
+            local port_found=false
+            for jport in "${json_haproxy_ports[@]}"; do
+                if [[ "$hport" == "$jport" ]]; then
+                    port_found=true
+                    break
+                fi
+            done
+            
+            if ! $port_found; then
+                echo -e "${red}HAProxy配置文件中的端口 $hport 在JSON配置中不存在${none}"
+                
+                # 询问是否从HAProxy配置中移除
+                echo -e "${yellow}是否从HAProxy配置中移除端口 $hport?${none}"
+                read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" remove_port
+                [ -z "$remove_port" ] && remove_port="y"
+                
+                if [[ "$remove_port" == "y" ]]; then
+                    # 创建临时文件
+                    local temp_file=$(mktemp)
+                    grep -v "bind \*:$hport" "$HAPROXY_CONFIG" > "$temp_file"
+                    # 同时移除关联的frontend和backend
+                    sed -i "/frontend.*$hport/,/default_backend/d" "$temp_file"
+                    sed -i "/backend.*$hport/,/server/d" "$temp_file"
+                    
+                    # 应用更改
+                    cp "$temp_file" "$HAPROXY_CONFIG"
+                    rm -f "$temp_file"
+                    
+                    echo -e "${green}已从HAProxy配置中移除端口 $hport${none}"
+                    log_info "从HAProxy配置中移除端口 $hport"
+                else
+                    echo -e "${yellow}保留HAProxy配置中的端口 $hport${none}"
+                    inconsistencies=$((inconsistencies + 1))
+                fi
+            fi
+        done
+        
+        # 检查JSON配置中的端口是否都在HAProxy配置文件中
+        for jport in "${json_haproxy_ports[@]}"; do
+            if ! grep -q "bind \*:$jport" "$HAPROXY_CONFIG"; then
+                echo -e "${red}JSON配置中的HAProxy端口 $jport 在HAProxy配置文件中不存在${none}"
+                inconsistencies=$((inconsistencies + 1))
+            fi
+        done
+    fi
+    
+    # 输出检查结果
+    echo "----------------------------------------------------------------"
+    if [[ $inconsistencies -eq 0 ]]; then
+        echo -e "${green}配置一致性检查通过，未发现问题${none}"
+        log_info "配置一致性检查通过"
+        return 0
+    else
+        echo -e "${red}配置一致性检查发现 $inconsistencies 个问题${none}"
+        log_warn "配置一致性检查发现 $inconsistencies 个问题"
+        
+        # 提示重启HAProxy服务
+        echo -e "${yellow}是否重启HAProxy服务以应用更改?${none}"
+        read -p "$(echo -e "(y/n, 默认: ${cyan}y${none}): ")" restart_haproxy
+        [ -z "$restart_haproxy" ] && restart_haproxy="y"
+        
+        if [[ "$restart_haproxy" == "y" ]]; then
+            if systemctl restart haproxy; then
+                echo -e "${green}HAProxy服务重启成功${none}"
+                log_info "HAProxy服务重启成功"
+            else
+                echo -e "${red}HAProxy服务重启失败${none}"
+                log_error "HAProxy服务重启失败"
+            fi
+        else
+            echo -e "${yellow}跳过重启HAProxy服务${none}"
+        fi
+        
+        return 1
     fi
 }
 
@@ -2600,9 +3390,10 @@ show_menu() {
     echo -e "  ${green}9.${none} 查看 Xray 日志"
     echo -e "  ${green}10.${none} 帮助信息"
     echo -e "  ${green}11.${none} 卸载 Xray"
+    echo -e "  ${green}12.${none} 检查xray和haproxy配置一致性"
     echo -e "  ${green}0.${none} 退出"
     echo "------------------------------------"
-    read -p "请选择 [0-11]: " choice
+    read -p "请选择 [0-12]: " choice
 
     case $choice in
         1)
@@ -2652,6 +3443,10 @@ show_menu() {
             ;;
         11)
             uninstall_xray
+            ;;
+        12)
+            check_haproxy_socks5_consistency
+            pause
             ;;
         0)
             echo -e "${green}感谢使用 Xray 多端口管理脚本${none}"
