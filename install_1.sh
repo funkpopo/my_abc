@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.93"
+VERSION="1.3.94"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -1434,7 +1434,11 @@ modify_port_configuration() {
     
     # 选择要修改的端口
     local port_count=$(jq '.ports | length' "$PORT_INFO_FILE")
-    while :; do
+    local port_index
+    local selected_port_info
+    local port
+    
+    while true; do
         read -p "$(echo -e "请选择要修改的配置序号 [${green}1-$port_count${none}]: ")" port_index
         
         if [[ -z "$port_index" ]] || ! [[ "$port_index" =~ ^[0-9]+$ ]] || [[ "$port_index" -lt 1 ]] || [[ "$port_index" -gt "$port_count" ]]; then
@@ -1443,8 +1447,8 @@ modify_port_configuration() {
         fi
         
         # 获取对应的端口信息
-        local selected_port_info=$(jq -c ".ports[$(($port_index-1))]" "$PORT_INFO_FILE")
-        local port=$(echo "$selected_port_info" | jq -r '.port')
+        selected_port_info=$(jq -c ".ports[$(($port_index-1))]" "$PORT_INFO_FILE")
+        port=$(echo "$selected_port_info" | jq -r '.port')
         
         echo
         echo -e "$yellow 正在修改端口 ${cyan}$port${none} 的配置 $none"
@@ -1452,81 +1456,173 @@ modify_port_configuration() {
     done
     
     # 修改菜单
-    echo "----------------------------------------------------------------"
-    echo -e "  ${green}1.${none} 修改UUID"
-    echo -e "  ${green}2.${none} 修改域名(SNI)"
-    echo -e "  ${green}3.${none} 修改ShortID"
-    echo -e "  ${green}4.${none} 修改SOCKS5代理设置"
-    echo -e "  ${green}5.${none} 管理HAProxy设置"  # 新增选项
-    echo -e "  ${green}6.${none} 返回上一级菜单"   # 原来的选项5改为6
-    echo "----------------------------------------------------------------"
-    
-    read -p "$(echo -e "请选择 [${green}1-6${none}]: ")" modify_choice  # 修改为1-6
-    
-    case $modify_choice in
-        1)
-            # 修改UUID
-            modify_port_uuid "$port"
-            break
-            ;;
-            
-        2)
-            # 修改域名
-            modify_port_domain "$port"
-            break
-            ;;
-            
-        3)
-            # 修改ShortID
-            modify_port_shortid "$port"
-            break
-            ;;
-            
-        4)
-            # 修改SOCKS5代理设置
-            modify_port_socks5 "$port"
-            break
-            ;;
-            
-        5)
-            # 管理HAProxy设置
-            modify_port_haproxy "$port"
-            break
-            ;;
-            
-        6)
-            return
-            ;;
-            
-        *)
-            error
-            ;;
-    esac
-    
-    # 更新配置文件
-    update_config_file
-    
-    # 重启 Xray
-    echo
-    echo -e "$yellow 重启 Xray 服务... $none"
-    if systemctl restart xray; then
-        echo -e "$green Xray 服务重启成功! $none"
-        log_info "修改端口 $port 配置后重启 Xray 成功"
-    else
-        echo -e "$red Xray 服务重启失败，请手动检查! $none"
-        log_error "修改端口 $port 配置后重启 Xray 失败"
-    fi
-    
-    # 为修改后的端口生成新的连接信息
-    local ip=$([ "$netstack" = "6" ] && echo "$IPv6" || echo "$IPv4")
-    local port_info=$(get_port_info "$port")
-    local uuid=$(echo "$port_info" | jq -r '.uuid')
-    local public_key=$(echo "$port_info" | jq -r '.public_key')
-    local shortid=$(echo "$port_info" | jq -r '.shortid')
-    local domain=$(echo "$port_info" | jq -r '.domain')
-    generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
-    
-    pause
+    while true; do
+        echo "----------------------------------------------------------------"
+        echo -e "  ${green}1.${none} 修改UUID"
+        echo -e "  ${green}2.${none} 修改域名(SNI)"
+        echo -e "  ${green}3.${none} 修改ShortID"
+        echo -e "  ${green}4.${none} 修改SOCKS5代理设置"
+        echo -e "  ${green}5.${none} 管理HAProxy设置"
+        echo -e "  ${green}6.${none} 返回上一级菜单"
+        echo "----------------------------------------------------------------"
+        
+        read -p "$(echo -e "请选择 [${green}1-6${none}]: ")" modify_choice
+        
+        case $modify_choice in
+            1)
+                # 修改UUID
+                modify_port_uuid "$port"
+                
+                # 更新配置文件
+                update_config_file
+                
+                # 重启 Xray
+                echo
+                echo -e "$yellow 重启 Xray 服务... $none"
+                if systemctl restart xray; then
+                    echo -e "$green Xray 服务重启成功! $none"
+                    log_info "修改端口 $port 配置后重启 Xray 成功"
+                else
+                    echo -e "$red Xray 服务重启失败，请手动检查! $none"
+                    log_error "修改端口 $port 配置后重启 Xray 失败"
+                fi
+                
+                # 询问是否继续修改
+                echo
+                echo -e "$yellow 是否继续修改该端口的其他配置? $none"
+                read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" continue_modify
+                [ -z "$continue_modify" ] && continue_modify="n"
+                
+                if [[ "$continue_modify" != "y" ]]; then
+                    return
+                fi
+                ;;
+                
+            2)
+                # 修改域名
+                modify_port_domain "$port"
+                
+                # 更新配置文件
+                update_config_file
+                
+                # 重启 Xray
+                echo
+                echo -e "$yellow 重启 Xray 服务... $none"
+                if systemctl restart xray; then
+                    echo -e "$green Xray 服务重启成功! $none"
+                    log_info "修改端口 $port 配置后重启 Xray 成功"
+                else
+                    echo -e "$red Xray 服务重启失败，请手动检查! $none"
+                    log_error "修改端口 $port 配置后重启 Xray 失败"
+                fi
+                
+                # 询问是否继续修改
+                echo
+                echo -e "$yellow 是否继续修改该端口的其他配置? $none"
+                read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" continue_modify
+                [ -z "$continue_modify" ] && continue_modify="n"
+                
+                if [[ "$continue_modify" != "y" ]]; then
+                    return
+                fi
+                ;;
+                
+            3)
+                # 修改ShortID
+                modify_port_shortid "$port"
+                
+                # 更新配置文件
+                update_config_file
+                
+                # 重启 Xray
+                echo
+                echo -e "$yellow 重启 Xray 服务... $none"
+                if systemctl restart xray; then
+                    echo -e "$green Xray 服务重启成功! $none"
+                    log_info "修改端口 $port 配置后重启 Xray 成功"
+                else
+                    echo -e "$red Xray 服务重启失败，请手动检查! $none"
+                    log_error "修改端口 $port 配置后重启 Xray 失败"
+                fi
+                
+                # 询问是否继续修改
+                echo
+                echo -e "$yellow 是否继续修改该端口的其他配置? $none"
+                read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" continue_modify
+                [ -z "$continue_modify" ] && continue_modify="n"
+                
+                if [[ "$continue_modify" != "y" ]]; then
+                    return
+                fi
+                ;;
+                
+            4)
+                # 修改SOCKS5代理设置
+                modify_port_socks5 "$port"
+                
+                # 更新配置文件
+                update_config_file
+                
+                # 重启 Xray
+                echo
+                echo -e "$yellow 重启 Xray 服务... $none"
+                if systemctl restart xray; then
+                    echo -e "$green Xray 服务重启成功! $none"
+                    log_info "修改端口 $port 配置后重启 Xray 成功"
+                else
+                    echo -e "$red Xray 服务重启失败，请手动检查! $none"
+                    log_error "修改端口 $port 配置后重启 Xray 失败"
+                fi
+                
+                # 询问是否继续修改
+                echo
+                echo -e "$yellow 是否继续修改该端口的其他配置? $none"
+                read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" continue_modify
+                [ -z "$continue_modify" ] && continue_modify="n"
+                
+                if [[ "$continue_modify" != "y" ]]; then
+                    return
+                fi
+                ;;
+                
+            5)
+                # 管理HAProxy设置
+                modify_port_haproxy "$port"
+                
+                # 更新配置文件
+                update_config_file
+                
+                # 重启 Xray
+                echo
+                echo -e "$yellow 重启 Xray 服务... $none"
+                if systemctl restart xray; then
+                    echo -e "$green Xray 服务重启成功! $none"
+                    log_info "修改端口 $port 配置后重启 Xray 成功"
+                else
+                    echo -e "$red Xray 服务重启失败，请手动检查! $none"
+                    log_error "修改端口 $port 配置后重启 Xray 失败"
+                fi
+                
+                # 询问是否继续修改
+                echo
+                echo -e "$yellow 是否继续修改该端口的其他配置? $none"
+                read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" continue_modify
+                [ -z "$continue_modify" ] && continue_modify="n"
+                
+                if [[ "$continue_modify" != "y" ]]; then
+                    return
+                fi
+                ;;
+                
+            6)
+                return
+                ;;
+                
+            *)
+                error
+                ;;
+        esac
+    done
 }
 
 # 修改端口的UUID
