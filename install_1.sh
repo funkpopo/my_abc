@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.91"
+VERSION="1.3.93"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -685,7 +685,6 @@ list_port_configurations() {
         echo -e "${red}HAProxy服务状态: 未运行${none}"
     fi
     
-    pause
 }
 
 # 备份当前所有配置
@@ -1468,26 +1467,31 @@ modify_port_configuration() {
         1)
             # 修改UUID
             modify_port_uuid "$port"
+            break
             ;;
             
         2)
             # 修改域名
             modify_port_domain "$port"
+            break
             ;;
             
         3)
             # 修改ShortID
             modify_port_shortid "$port"
+            break
             ;;
             
         4)
             # 修改SOCKS5代理设置
             modify_port_socks5 "$port"
+            break
             ;;
             
         5)
             # 管理HAProxy设置
             modify_port_haproxy "$port"
+            break
             ;;
             
         6)
@@ -1496,7 +1500,6 @@ modify_port_configuration() {
             
         *)
             error
-            return
             ;;
     esac
     
@@ -1946,10 +1949,9 @@ modify_port_haproxy() {
         echo
         echo -e "选择操作:"
         echo -e "  ${green}1.${none} 修改配置"
-        echo -e "  ${green}2.${none} 禁用HAProxy"
-        echo -e "  ${green}3.${none} 返回"
+        echo -e "  ${green}2.${none} 返回"
         
-        read -p "$(echo -e "请选择 [${green}1-3${none}]: ")" haproxy_action
+        read -p "$(echo -e "请选择 [${green}1-2${none}]: ")" haproxy_action
         
         case $haproxy_action in
             1)
@@ -1982,21 +1984,6 @@ modify_port_haproxy() {
                 ;;
                 
             2)
-                # 禁用HAProxy
-                echo -e "确认要禁用端口 $port 的HAProxy?"
-                read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" confirm_disable
-                
-                if [[ "$confirm_disable" == "y" ]]; then
-                    set_port_haproxy_config "$port" "n" "" "" ""
-                    update_haproxy_config
-                    success "HAProxy已禁用!"
-                    log_info "禁用端口 $port 的HAProxy"
-                else
-                    echo -e "${yellow}操作已取消${none}"
-                fi
-                ;;
-                
-            3)
                 return
                 ;;
                 
@@ -2205,10 +2192,10 @@ uninstall_xray() {
     fi
 }
 
-# 显示所有端口的连接信息
+# 显示所有或特定端口的连接信息
 show_all_connections() {
     echo
-    echo -e "$yellow 所有端口的连接信息 $none"
+    echo -e "$yellow 端口连接信息 $none"
     echo "----------------------------------------------------------------"
     
     if [[ ! -s "$PORT_INFO_FILE" ]] || [[ $(jq '.ports | length' "$PORT_INFO_FILE") -eq 0 ]]; then
@@ -2222,28 +2209,120 @@ show_all_connections() {
         return
     fi
     
+    # 显示所有配置的端口列表
+    echo -e "${cyan}序号   端口    UUID    域名${none}"
+    echo "----------------------------------------------------------------"
+    
+    local index=1
+    local ports=()
+    
     jq -c '.ports[]' "$PORT_INFO_FILE" | while read -r port_info; do
         local port=$(echo "$port_info" | jq -r '.port')
+        ports+=("$port")
         local uuid=$(echo "$port_info" | jq -r '.uuid')
-        local public_key=$(echo "$port_info" | jq -r '.public_key')
-        local shortid=$(echo "$port_info" | jq -r '.shortid')
+        # 截取UUID的开头和结尾部分，中间用省略号
+        local uuid_short="${uuid:0:8}...${uuid:24}"
         local domain=$(echo "$port_info" | jq -r '.domain')
         
-        # 根据当前网络环境选择IP
-        if [[ -n "$IPv4" ]]; then
-            ip=$IPv4
-            netstack=4
-        elif [[ -n "$IPv6" ]]; then
-            ip=$IPv6
-            netstack=6
-        fi
+        echo -e "${green}$index${none}    ${cyan}$port${none}    ${yellow}$uuid_short${none}    ${magenta}$domain${none}"
+        index=$((index+1))
+    done
+    
+    echo "----------------------------------------------------------------"
+    
+    # 提供选择显示方式的选项
+    echo -e "请选择要显示的端口连接信息:"
+    echo -e "  ${green}0.${none} 返回上级菜单"
+    echo -e "  ${green}1.${none} 显示所有端口的连接信息"
+    echo -e "  ${green}2.${none} 显示特定端口的连接信息"
+    
+    while true; do
+        read -p "$(echo -e "请选择 [${green}0-2${none}]: ")" view_choice
         
-        generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
+        case $view_choice in
+            0)
+                return
+                ;;
+            1)
+                # 显示所有端口的连接信息
+                echo
+                echo -e "$yellow 显示所有端口的连接信息 $none"
+                echo "----------------------------------------------------------------"
+                
+                # 根据当前网络环境选择IP
+                local ip
+                local netstack
+                if [[ -n "$IPv4" ]]; then
+                    ip=$IPv4
+                    netstack=4
+                elif [[ -n "$IPv6" ]]; then
+                    ip=$IPv6
+                    netstack=6
+                fi
+                
+                jq -c '.ports[]' "$PORT_INFO_FILE" | while read -r port_info; do
+                    local port=$(echo "$port_info" | jq -r '.port')
+                    local uuid=$(echo "$port_info" | jq -r '.uuid')
+                    local public_key=$(echo "$port_info" | jq -r '.public_key')
+                    local shortid=$(echo "$port_info" | jq -r '.shortid')
+                    local domain=$(echo "$port_info" | jq -r '.domain')
+                    
+                    generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
+                done
+                
+                break
+                ;;
+            2)
+                # 显示特定端口的连接信息
+                local port_count=$(jq '.ports | length' "$PORT_INFO_FILE")
+                
+                while true; do
+                    read -p "$(echo -e "请选择端口序号 [${green}1-$port_count${none}], 输入 0 返回: ")" port_index
+                    
+                    if [[ "$port_index" == "0" ]]; then
+                        # 返回上一级选择
+                        continue 2
+                    fi
+                    
+                    if [[ -z "$port_index" ]] || ! [[ "$port_index" =~ ^[0-9]+$ ]] || [[ "$port_index" -lt 1 ]] || [[ "$port_index" -gt "$port_count" ]]; then
+                        error
+                        continue
+                    fi
+                    
+                    # 获取对应的端口信息
+                    local selected_port_info=$(jq -c ".ports[$(($port_index-1))]" "$PORT_INFO_FILE")
+                    local port=$(echo "$selected_port_info" | jq -r '.port')
+                    local uuid=$(echo "$selected_port_info" | jq -r '.uuid')
+                    local public_key=$(echo "$selected_port_info" | jq -r '.public_key')
+                    local shortid=$(echo "$selected_port_info" | jq -r '.shortid')
+                    local domain=$(echo "$selected_port_info" | jq -r '.domain')
+                    
+                    # 根据当前网络环境选择IP
+                    local ip
+                    local netstack
+                    if [[ -n "$IPv4" ]]; then
+                        ip=$IPv4
+                        netstack=4
+                    elif [[ -n "$IPv6" ]]; then
+                        ip=$IPv6
+                        netstack=6
+                    fi
+                    
+                    # 显示该端口的连接信息
+                    generate_connection_info "$port" "$uuid" "$public_key" "$shortid" "$domain" "$ip" "$netstack"
+                    break
+                done
+                
+                break
+                ;;
+            *)
+                error
+                ;;
+        esac
     done
     
     pause
 }
-
 
 
 # 格式化字节大小
