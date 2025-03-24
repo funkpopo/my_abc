@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.4.96"
+VERSION="1.4.99"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -2415,6 +2415,8 @@ view_xray_logs() {
     pause
 }
 
+
+
 # 从Xray配置文件直接生成HAProxy配置，并更新端口信息文件
 generate_haproxy_config_direct() {
     echo
@@ -2497,8 +2499,14 @@ EOL
                 local uuid=$(echo "$inbound" | jq -r '.settings.clients[0].id')
                 local private_key=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.privateKey')
                 
-                # 生成公钥（这里简化处理，实际应该使用xray x25519命令）
-                local public_key="auto_generated_public_key"
+                # 生成公钥（尝试使用xray命令）
+                local tmp_key=$(echo -n ${private_key} | xargs xray x25519 -i 2>/dev/null || echo "Failed")
+                local public_key
+                if [[ "$tmp_key" == "Failed" ]]; then
+                    public_key="auto_generated_public_key"
+                else
+                    public_key=$(echo ${tmp_key} | awk '{print $6}')
+                fi
                 
                 local shortid=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
                 local domain=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
@@ -2525,28 +2533,49 @@ EOL
                 # 如果有SOCKS5出站，添加SOCKS5信息
                 if [[ -n "$socks5_tag" ]]; then
                     local socks5_config=$(jq -c --arg tag "$socks5_tag" '.outbounds[] | select(.tag == $tag)' "$CONFIG_FILE")
+                    
+                    # 获取SOCKS5服务器地址和端口
                     local socks5_address=$(echo "$socks5_config" | jq -r '.settings.servers[0].address')
                     local socks5_port=$(echo "$socks5_config" | jq -r '.settings.servers[0].port')
                     
-                    # 检查是否需要认证
+                    # 检查是否需要认证以及用户名密码
                     local auth_needed="false"
                     local socks5_user=""
                     local socks5_pass=""
                     
-                    if [[ $(echo "$socks5_config" | jq 'has("settings") and .settings | has("servers") and .settings.servers[0] | has("users")') == "true" ]]; then
+                    # 检查SOCKS5配置中是否包含用户验证
+                    if echo "$socks5_config" | jq -e '.settings.servers[0].users' > /dev/null; then
                         auth_needed="true"
                         socks5_user=$(echo "$socks5_config" | jq -r '.settings.servers[0].users[0].user // ""')
                         socks5_pass=$(echo "$socks5_config" | jq -r '.settings.servers[0].users[0].pass // ""')
+                        
+                        # 如果用户名或密码是占位符，提示用户输入
+                        if [[ "$socks5_user" == "1" || -z "$socks5_user" || "$socks5_pass" == "1" || -z "$socks5_pass" ]]; then
+                            echo -e "${yellow}检测到端口 $port 的SOCKS5认证信息不完整${none}"
+                            echo -e "请输入SOCKS5用户名:"
+                            read -p "$(echo -e "> ")" new_socks5_user
+                            echo -e "请输入SOCKS5密码:"
+                            read -p "$(echo -e "> ")" new_socks5_pass
+                            
+                            if [[ -n "$new_socks5_user" && -n "$new_socks5_pass" ]]; then
+                                socks5_user="$new_socks5_user"
+                                socks5_pass="$new_socks5_pass"
+                            else
+                                echo -e "${yellow}未提供认证信息，使用默认值${none}"
+                                socks5_user="user"
+                                socks5_pass="password"
+                            fi
+                        fi
                     fi
                     
                     # 检查是否启用了UDP over TCP
                     local udp_over_tcp="false"
-                    if [[ $(echo "$socks5_config" | jq 'has("streamSettings") and .streamSettings | has("sockopt") and .streamSettings.sockopt | has("udpFragmentSize")') == "true" ]]; then
+                    if echo "$socks5_config" | jq -e '.streamSettings.sockopt.udpFragmentSize' > /dev/null; then
                         udp_over_tcp="true"
                     fi
                     
                     # 如果SOCKS5配置无效，提示用户输入
-                    if [[ "$socks5_address" == "1" || "$socks5_address" == "localhost" || "$socks5_port" -eq 1 ]]; then
+                    if [[ "$socks5_address" == "1" || "$socks5_address" == "localhost" || "$socks5_port" -eq 1 || -z "$socks5_address" || -z "$socks5_port" ]]; then
                         echo -e "${yellow}检测到端口 $port 的SOCKS5配置无效 (地址=$socks5_address, 端口=$socks5_port)${none}"
                         echo -e "请输入正确的SOCKS5服务器地址:"
                         read -p "$(echo -e "> ")" new_socks5_address
@@ -2558,6 +2587,7 @@ EOL
                             socks5_address="$new_socks5_address"
                             socks5_port="$new_socks5_port"
                         else
+                            echo -e "${yellow}未提供有效信息，使用默认值${none}"
                             socks5_address="127.0.0.1"
                             socks5_port="1080"
                         fi
@@ -2571,6 +2601,7 @@ EOL
                     done
                     
                     # 添加SOCKS5配置和HAProxy配置到端口信息
+                    # 注意转义双引号，确保JSON格式正确
                     port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
                     port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $haproxy_port, \"threads\": 8, \"maxconn\": 200}"
                     
@@ -2585,6 +2616,11 @@ backend socks_servers_$port
 
 EOL
                     echo -e "${green}为端口 $port 添加HAProxy配置，监听端口 $haproxy_port${none}"
+                    
+                    # 如果需要认证，显示认证信息
+                    if [[ "$auth_needed" == "true" ]]; then
+                        echo -e "${green}SOCKS5认证信息: 用户名=$socks5_user, 密码=$socks5_pass${none}"
+                    fi
                 else
                     # 不存在SOCKS5配置，添加空配置
                     port_info="$port_info, \"socks5\": null, \"haproxy\": null"
@@ -2596,6 +2632,7 @@ EOL
                 # 添加到端口信息文件
                 local updated_ports=$(jq ".ports += [$(echo $port_info)]" "$PORT_INFO_FILE")
                 echo "$updated_ports" > "$PORT_INFO_FILE"
+                chmod 600 "$PORT_INFO_FILE"
                 
                 echo -e "${green}已添加端口 $port 的配置信息${none}"
             fi
@@ -2613,9 +2650,233 @@ EOL
         echo -e "${red}HAProxy服务重启失败，请检查配置${none}"
     fi
     
-    # 重新生成并更新Xray配置文件
+    # 需要修改update_config_file函数来确保SOCKS5认证信息被正确包含
+    # 但为了不改变原函数，这里创建一个临时函数
+    update_config_file_with_auth() {
+        # 备份当前配置
+        if [[ -f "$CONFIG_FILE" ]]; then
+            cp "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+        fi
+        
+        # 创建基本配置
+        cat > "$CONFIG_FILE" << EOL
+{
+  "log": {
+    "loglevel": "warning",
+    "access": "/var/log/xray/access.log",
+    "error": "/var/log/xray/error.log"
+  },
+  "dns": {
+    "servers": [
+      "tcp://8.8.8.8",
+      "tcp://1.1.1.1",
+      "tcp://1.0.0.1",
+      "tcp://8.8.4.4",
+      "localhost"
+    ],
+    "queryStrategy": "UseIPv4",
+    "disableCache": true,
+    "disableFallback": false,
+    "tag": "dns-out"
+  },
+  "inbounds": [],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "direct"
+    },
+    {
+      "protocol": "dns",
+      "tag": "dns-out"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "geoip:private"
+        ],
+        "outboundTag": "blocked"
+      }
+    ]
+  }
+}
+EOL
+        
+        # 临时文件
+        local temp_config=$(mktemp)
+        cp "$CONFIG_FILE" "$temp_config"
+        
+        # 读取所有端口配置
+        local ports_config=$(jq -c '.ports[]' "$PORT_INFO_FILE")
+        
+        # 处理每个端口配置
+        echo "$ports_config" | while read -r port_info; do
+            local port=$(echo "$port_info" | jq -r '.port')
+            local uuid=$(echo "$port_info" | jq -r '.uuid')
+            local private_key=$(echo "$port_info" | jq -r '.private_key')
+            local shortid=$(echo "$port_info" | jq -r '.shortid')
+            local domain=$(echo "$port_info" | jq -r '.domain')
+            
+            # 创建VLESS+Reality的入站配置
+            cat > "$temp_config.inbound" << EOL
+{
+  "listen": "0.0.0.0",
+  "port": ${port},
+  "protocol": "vless",
+  "settings": {
+    "clients": [
+      {
+        "id": "${uuid}",
+        "flow": "xtls-rprx-vision"
+      }
+    ],
+    "decryption": "none"
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": "${domain}:443",
+      "xver": 0,
+      "serverNames": ["${domain}"],
+      "privateKey": "${private_key}",
+      "shortIds": ["${shortid}"]
+    }
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls", "quic"]
+  },
+  "tag": "inbound-${port}"
+}
+EOL
+
+            # 添加入站配置到主配置
+            jq ".inbounds += [$(cat "$temp_config.inbound")]" "$temp_config" > "$temp_config.new"
+            mv "$temp_config.new" "$temp_config"
+            
+            # 处理SOCKS5代理配置
+            local socks5_config=$(echo "$port_info" | jq -r '.socks5')
+            
+            if [[ "$socks5_config" != "null" && "$(echo "$socks5_config" | jq -r '.enabled')" == "true" ]]; then
+                # 获取HAProxy配置
+                local haproxy_config=$(echo "$port_info" | jq -r '.haproxy')
+                local socks5_tag="socks5-out-$port"
+                
+                # 如果启用了HAProxy，使用HAProxy的配置
+                if [[ "$haproxy_config" != "null" && "$(echo "$haproxy_config" | jq -r '.enabled')" == "true" ]]; then
+                    # 使用HAProxy地址和端口
+                    local socks5_address="127.0.0.1"
+                    local socks5_port=$(echo "$haproxy_config" | jq -r '.port')
+                    
+                    echo -e "${green}使用HAProxy配置: 127.0.0.1:$socks5_port${none}"
+                else
+                    # 使用原始SOCKS5配置
+                    local socks5_address=$(echo "$socks5_config" | jq -r '.address')
+                    local socks5_port=$(echo "$socks5_config" | jq -r '.port')
+                    
+                    echo -e "${yellow}未启用HAProxy，使用原始SOCKS5配置: $socks5_address:$socks5_port${none}"
+                fi
+                
+                # 获取其他SOCKS5配置
+                local auth_needed=$(echo "$socks5_config" | jq -r '.auth_needed')
+                local username=$(echo "$socks5_config" | jq -r '.username')
+                local password=$(echo "$socks5_config" | jq -r '.password')
+                local udp_over_tcp=$(echo "$socks5_config" | jq -r '.udp_over_tcp')
+                
+                # 创建SOCKS5出站配置
+                cat > "$temp_config.socks5" << EOL
+{
+  "protocol": "socks",
+  "settings": {
+    "servers": [
+      {
+        "address": "${socks5_address}",
+        "port": ${socks5_port}
+EOL
+
+                # 如果需要认证，添加用户名和密码
+                if [[ "$auth_needed" == "true" && -n "$username" && -n "$password" ]]; then
+                    cat >> "$temp_config.socks5" << EOL
+        ,
+        "users": [
+          {
+            "user": "${username}",
+            "pass": "${password}"
+          }
+        ]
+EOL
+                fi
+
+                # 结束servers配置
+                cat >> "$temp_config.socks5" << EOL
+      }
+    ]
+  }
+EOL
+
+                # 添加stream设置
+                if [[ "$udp_over_tcp" == "true" ]]; then
+                    cat >> "$temp_config.socks5" << EOL
+  ,"streamSettings": {"sockopt": {"udpFragmentSize": 1400,"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"mark": 255}},"transportLayer": true
+EOL
+                else
+                    cat >> "$temp_config.socks5" << EOL
+  ,"streamSettings": {"sockopt": {"tcpFastOpen": true,"tcpKeepAliveInterval": 15,"tcpMptcp": true,"tcpNoDelay": true,"mark": 255}}
+EOL
+                fi
+                
+                # 结束SOCKS5配置
+                cat >> "$temp_config.socks5" << EOL
+  ,"tag": "${socks5_tag}"
+}
+EOL
+
+                # 添加SOCKS5出站到主配置
+                jq ".outbounds += [$(cat "$temp_config.socks5")]" "$temp_config" > "$temp_config.new"
+                mv "$temp_config.new" "$temp_config"
+                
+                # 创建路由规则
+                # 根据UDP over TCP设置选择合适的网络类型
+                local network_type=$(if [[ "$udp_over_tcp" == "true" ]]; then echo "tcp,udp"; else echo "tcp"; fi)
+                
+                cat > "$temp_config.rule" << EOL
+{
+  "type": "field",
+  "inboundTag": ["inbound-${port}"],
+  "outboundTag": "${socks5_tag}"
+}
+EOL
+                
+                # 添加路由规则到主配置
+                jq ".routing.rules += [$(cat "$temp_config.rule")]" "$temp_config" > "$temp_config.new"
+                mv "$temp_config.new" "$temp_config"
+            fi
+        done
+        
+        # 应用新配置
+        cp "$temp_config" "$CONFIG_FILE"
+        chmod 644 "$CONFIG_FILE"
+        
+        # 清理临时文件
+        rm -f "$temp_config" "$temp_config.inbound" "$temp_config.socks5" "$temp_config.rule" "$temp_config.new" 2>/dev/null
+
+        echo -e "${green}配置文件已更新并包含SOCKS5认证信息${none}"
+    }
+    
+    # 使用新函数更新Xray配置，确保认证信息被包含
     echo -e "${yellow}正在使用端口信息更新Xray配置文件...${none}"
-    update_config_file
+    update_config_file_with_auth
     
     # 重启Xray服务
     echo -e "${yellow}正在重启Xray服务...${none}"
@@ -2629,6 +2890,7 @@ EOL
     pause
     return 0
 }
+
 
 
 
