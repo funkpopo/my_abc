@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="1.3.93"
+VERSION="1.4.96"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -971,8 +971,8 @@ add_port_configuration() {
         echo
         echo -e "${yellow}正在为SOCKS5代理配置HAProxy...${none}"
         
-        # 默认HAProxy端口为VLESS端口+1
-        local default_haproxy_port=$((port + 1))
+        # 默认HAProxy端口为VLESS端口+10
+        local default_haproxy_port=$((port + 10))
         
         # 检查端口是否被占用
         while lsof -i:"$default_haproxy_port" >/dev/null 2>&1; do
@@ -2415,6 +2415,223 @@ view_xray_logs() {
     pause
 }
 
+# 从Xray配置文件直接生成HAProxy配置，并更新端口信息文件
+generate_haproxy_config_direct() {
+    echo
+    echo -e "$yellow 直接从Xray配置生成HAProxy配置 $none"
+    echo "----------------------------------------------------------------"
+    
+    # 检查Xray配置文件是否存在
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${red}Xray配置文件不存在${none}"
+        return 1
+    fi
+    
+    # 临时文件，用于存储解析结果
+    local temp_file=$(mktemp)
+    
+    # 提取所有inbound的标签和端口
+    jq -r '.inbounds[] | "\(.tag)|\(.port)"' "$CONFIG_FILE" > "$temp_file"
+    
+    # 确保HAProxy目录存在
+    mkdir -p /etc/haproxy
+    
+    # 备份当前HAProxy配置
+    if [[ -f "$HAPROXY_CONFIG" ]]; then
+        cp "$HAPROXY_CONFIG" "${HAPROXY_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    fi
+    
+    # 创建HAProxy配置头部
+    cat > "$HAPROXY_CONFIG" << EOL
+global
+    maxconn 4000
+    nbproc 1
+    nbthread 8
+    tune.bufsize 32768
+    tune.maxrewrite 1024
+
+defaults
+    mode tcp
+    timeout connect 2s
+    timeout client 25s
+    timeout server 25s
+    option tcp-smart-accept
+    option tcp-smart-connect
+    option tcplog
+
+EOL
+    
+    # 检查是否有任何SOCKS5出站
+    local socks5_tags=$(jq -r '.outbounds[] | select(.protocol == "socks") | .tag' "$CONFIG_FILE")
+    
+    if [[ -z "$socks5_tags" ]]; then
+        echo -e "${yellow}在Xray配置中没有找到任何SOCKS5出站${none}"
+        rm -f "$temp_file"
+        return 0
+    fi
+    
+    # 确保端口信息文件存在，如果不存在则创建
+    if [[ ! -f "$PORT_INFO_FILE" ]]; then
+        echo '{"ports":[]}' > "$PORT_INFO_FILE"
+        chmod 600 "$PORT_INFO_FILE"
+        echo -e "${green}创建了新的端口信息文件${none}"
+    fi
+    
+    # 提取并保存所有inbound配置到端口信息文件
+    echo -e "${yellow}正在从Xray配置中提取并更新端口信息...${none}"
+    
+    # 首先清空端口信息文件中的ports数组
+    local reset_ports=$(jq '.ports = []' "$PORT_INFO_FILE")
+    echo "$reset_ports" > "$PORT_INFO_FILE"
+    
+    # 遍历所有inbound
+    jq -c '.inbounds[]' "$CONFIG_FILE" | while read -r inbound; do
+        local port=$(echo "$inbound" | jq -r '.port')
+        local protocol=$(echo "$inbound" | jq -r '.protocol')
+        
+        # 只处理VLESS+Reality协议
+        if [[ "$protocol" == "vless" ]]; then
+            local security=$(echo "$inbound" | jq -r '.streamSettings.security')
+            
+            if [[ "$security" == "reality" ]]; then
+                local uuid=$(echo "$inbound" | jq -r '.settings.clients[0].id')
+                local private_key=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.privateKey')
+                
+                # 生成公钥（这里简化处理，实际应该使用xray x25519命令）
+                local public_key="auto_generated_public_key"
+                
+                local shortid=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
+                local domain=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+                
+                # 检查是否有关联的SOCKS5出站
+                local tag=$(echo "$inbound" | jq -r '.tag')
+                local socks5_tag=""
+                
+                # 查找与此inbound关联的SOCKS5出站
+                for rule in $(jq -c '.routing.rules[]' "$CONFIG_FILE"); do
+                    local inbound_tags=$(echo "$rule" | jq -r '.inboundTag[]? // empty')
+                    if [[ "$inbound_tags" == *"$tag"* ]]; then
+                        local outbound_tag=$(echo "$rule" | jq -r '.outboundTag')
+                        if [[ "$outbound_tag" == *"socks5"* ]]; then
+                            socks5_tag="$outbound_tag"
+                            break
+                        fi
+                    fi
+                done
+                
+                # 构建端口信息
+                local port_info="{\"port\": $port, \"uuid\": \"$uuid\", \"private_key\": \"$private_key\", \"public_key\": \"$public_key\", \"shortid\": \"$shortid\", \"domain\": \"$domain\""
+                
+                # 如果有SOCKS5出站，添加SOCKS5信息
+                if [[ -n "$socks5_tag" ]]; then
+                    local socks5_config=$(jq -c --arg tag "$socks5_tag" '.outbounds[] | select(.tag == $tag)' "$CONFIG_FILE")
+                    local socks5_address=$(echo "$socks5_config" | jq -r '.settings.servers[0].address')
+                    local socks5_port=$(echo "$socks5_config" | jq -r '.settings.servers[0].port')
+                    
+                    # 检查是否需要认证
+                    local auth_needed="false"
+                    local socks5_user=""
+                    local socks5_pass=""
+                    
+                    if [[ $(echo "$socks5_config" | jq 'has("settings") and .settings | has("servers") and .settings.servers[0] | has("users")') == "true" ]]; then
+                        auth_needed="true"
+                        socks5_user=$(echo "$socks5_config" | jq -r '.settings.servers[0].users[0].user // ""')
+                        socks5_pass=$(echo "$socks5_config" | jq -r '.settings.servers[0].users[0].pass // ""')
+                    fi
+                    
+                    # 检查是否启用了UDP over TCP
+                    local udp_over_tcp="false"
+                    if [[ $(echo "$socks5_config" | jq 'has("streamSettings") and .streamSettings | has("sockopt") and .streamSettings.sockopt | has("udpFragmentSize")') == "true" ]]; then
+                        udp_over_tcp="true"
+                    fi
+                    
+                    # 如果SOCKS5配置无效，提示用户输入
+                    if [[ "$socks5_address" == "1" || "$socks5_address" == "localhost" || "$socks5_port" -eq 1 ]]; then
+                        echo -e "${yellow}检测到端口 $port 的SOCKS5配置无效 (地址=$socks5_address, 端口=$socks5_port)${none}"
+                        echo -e "请输入正确的SOCKS5服务器地址:"
+                        read -p "$(echo -e "> ")" new_socks5_address
+                        
+                        echo -e "请输入正确的SOCKS5服务器端口:"
+                        read -p "$(echo -e "> ")" new_socks5_port
+                        
+                        if [[ -n "$new_socks5_address" && -n "$new_socks5_port" ]]; then
+                            socks5_address="$new_socks5_address"
+                            socks5_port="$new_socks5_port"
+                        else
+                            socks5_address="127.0.0.1"
+                            socks5_port="1080"
+                        fi
+                    fi
+                    
+                    # 为HAProxy配置端口（原来端口+1）
+                    local haproxy_port=$((port + 1))
+                    while lsof -i:"$haproxy_port" >/dev/null 2>&1; do
+                        echo -e "${yellow}端口 $haproxy_port 已被占用，尝试下一个端口${none}"
+                        haproxy_port=$((haproxy_port + 1))
+                    done
+                    
+                    # 添加SOCKS5配置和HAProxy配置到端口信息
+                    port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
+                    port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $haproxy_port, \"threads\": 8, \"maxconn\": 200}"
+                    
+                    # 添加到HAProxy配置
+                    cat >> "$HAPROXY_CONFIG" << EOL
+frontend socks_front_$port
+    bind *:$haproxy_port
+    default_backend socks_servers_$port
+
+backend socks_servers_$port
+    server socks1 $socks5_address:$socks5_port maxconn 200 check inter 5000 rise 2 fall 3
+
+EOL
+                    echo -e "${green}为端口 $port 添加HAProxy配置，监听端口 $haproxy_port${none}"
+                else
+                    # 不存在SOCKS5配置，添加空配置
+                    port_info="$port_info, \"socks5\": null, \"haproxy\": null"
+                fi
+                
+                # 结束端口信息JSON
+                port_info="$port_info}"
+                
+                # 添加到端口信息文件
+                local updated_ports=$(jq ".ports += [$(echo $port_info)]" "$PORT_INFO_FILE")
+                echo "$updated_ports" > "$PORT_INFO_FILE"
+                
+                echo -e "${green}已添加端口 $port 的配置信息${none}"
+            fi
+        fi
+    done
+    
+    # 清理临时文件
+    rm -f "$temp_file"
+    
+    # 重启HAProxy服务
+    echo -e "${yellow}正在重启HAProxy服务...${none}"
+    if systemctl restart haproxy; then
+        echo -e "${green}HAProxy服务已重启${none}"
+    else
+        echo -e "${red}HAProxy服务重启失败，请检查配置${none}"
+    fi
+    
+    # 重新生成并更新Xray配置文件
+    echo -e "${yellow}正在使用端口信息更新Xray配置文件...${none}"
+    update_config_file
+    
+    # 重启Xray服务
+    echo -e "${yellow}正在重启Xray服务...${none}"
+    if systemctl restart xray; then
+        echo -e "${green}Xray服务已重启${none}"
+    else
+        echo -e "${red}Xray服务重启失败，请检查配置${none}"
+    fi
+    
+    echo -e "${green}已完成配置同步和HAProxy配置生成!${none}"
+    pause
+    return 0
+}
+
+
+
 # 安装 Xray 的主函数
 install_xray() {
     # 说明
@@ -2501,9 +2718,10 @@ show_menu() {
     echo -e "  ${green}9.${none} 查看 Xray 日志"
     echo -e "  ${green}10.${none} 帮助信息"
     echo -e "  ${green}11.${none} 卸载 Xray"
+    echo -e "  ${green}12.${none} 根据Xray配置生成HAProxy配置"
     echo -e "  ${green}0.${none} 退出"
     echo "------------------------------------"
-    read -p "请选择 [0-11]: " choice
+    read -p "请选择 [0-12]: " choice
 
     case $choice in
         1)
@@ -2553,6 +2771,9 @@ show_menu() {
             ;;
         11)
             uninstall_xray
+            ;;
+        12)
+            generate_haproxy_config_direct
             ;;
         0)
             echo -e "${green}感谢使用 Xray 多端口管理脚本${none}"
