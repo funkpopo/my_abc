@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="2.0.6"
+VERSION="2.0.7"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -2241,7 +2241,7 @@ modify_port_haproxy() {
         fi
     fi
     
-    pause
+    
 }
 
 # 删除端口配置
@@ -2934,7 +2934,7 @@ show_menu() {
         echo -e "  ${green}9.${none} 查看 Xray 日志"
         echo -e "  ${green}10.${none} 帮助信息"
         echo -e "  ${green}11.${none} 卸载 Xray"
-        echo -e "  ${green}12.${none} 根据Xray配置生成HAProxy配置"
+        echo -e "  ${green}12.${none} 根据当前Xray配置信息生成HAProxy配置（会同时修改当前xray配置）"
         echo -e "  ${green}0.${none} 退出"
         echo "------------------------------------"
         read -p "请选择 [0-12]: " choice
