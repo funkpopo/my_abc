@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="2.0.7"
+VERSION="2.0.8"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -723,6 +723,7 @@ backup_configuration() {
     pause
 }
 
+
 # 恢复配置
 restore_configuration() {
     echo
@@ -747,56 +748,94 @@ restore_configuration() {
     
     # 创建临时目录
     local temp_dir=$(mktemp -d)
+    echo -e "${yellow}解压备份文件到: $temp_dir${none}"
     
     # 解压备份文件
-    tar -xzf "$backup_file" -C "$temp_dir"
+    if ! tar -xzf "$backup_file" -C "$temp_dir"; then
+        echo -e "${red}解压备份文件失败${none}"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # 显示解压后的文件结构
+    echo -e "${yellow}解压后的文件结构:${none}"
+    find "$temp_dir" -type f | sort
+    
+    # 查找配置文件 - 不限定在哪个目录下
+    local port_info_file=$(find "$temp_dir" -name ".xray_port_info.json" | head -n 1)
+    local xray_config_file=$(find "$temp_dir" -name "config.json" | head -n 1)
+    local haproxy_config_file=$(find "$temp_dir" -name "haproxy.cfg" | head -n 1)
+    
+    echo -e "${yellow}找到的配置文件:${none}"
+    echo "端口信息文件: ${port_info_file:-未找到}"
+    echo "Xray配置文件: ${xray_config_file:-未找到}"
+    echo "HAProxy配置文件: ${haproxy_config_file:-未找到}"
     
     # 恢复端口配置信息
-    if [[ -f "$temp_dir/$(basename "$PORT_INFO_FILE")" ]]; then
-        cp "$temp_dir/$(basename "$PORT_INFO_FILE")" "$PORT_INFO_FILE"
+    if [[ -n "$port_info_file" && -f "$port_info_file" ]]; then
+        echo -e "${yellow}恢复端口配置信息...${none}"
+        cp "$port_info_file" "$PORT_INFO_FILE"
         chmod 600 "$PORT_INFO_FILE"
+        echo -e "${green}端口配置信息恢复成功${none}"
+    else
+        echo -e "${red}未找到端口配置信息文件${none}"
     fi
     
     # 恢复Xray配置
-    if [[ -f "$temp_dir/$(basename "$CONFIG_FILE")" ]]; then
-        cp "$temp_dir/$(basename "$CONFIG_FILE")" "$CONFIG_FILE"
+    if [[ -n "$xray_config_file" && -f "$xray_config_file" ]]; then
+        echo -e "${yellow}恢复Xray配置...${none}"
+        mkdir -p "/usr/local/etc/xray"
+        cp "$xray_config_file" "$CONFIG_FILE"
         chmod 644 "$CONFIG_FILE"
+        echo -e "${green}Xray配置恢复成功${none}"
+    else
+        echo -e "${red}未找到Xray配置文件${none}"
     fi
 
     # 恢复HAProxy配置
-    if [[ -f "$temp_dir/$(basename "$HAPROXY_CONFIG")" ]]; then
-        cp "$temp_dir/$(basename "$HAPROXY_CONFIG")" "$HAPROXY_CONFIG"
+    if [[ -n "$haproxy_config_file" && -f "$haproxy_config_file" ]]; then
+        echo -e "${yellow}恢复HAProxy配置...${none}"
+        mkdir -p "/etc/haproxy"
+        cp "$haproxy_config_file" "$HAPROXY_CONFIG"
         chmod 644 "$HAPROXY_CONFIG"
+        echo -e "${green}HAProxy配置恢复成功${none}"
+    else
+        echo -e "${red}未找到HAProxy配置文件${none}"
     fi
     
     # 重启HAProxy服务
-    echo -e "$yellow 重启 HAProxy 服务... $none"
-    if systemctl restart haproxy; then
-        echo -e "$green HAProxy 服务重启成功! $none"
-        log_info "恢复配置后重启HAProxy成功"
-    else
-        echo -e "$red HAProxy 服务重启失败，请手动检查! $none"
-        log_error "恢复配置后重启HAProxy失败"
+    if [[ -n "$haproxy_config_file" && -f "$haproxy_config_file" ]]; then
+        echo -e "$yellow 重启 HAProxy 服务... $none"
+        if systemctl restart haproxy; then
+            echo -e "$green HAProxy 服务重启成功! $none"
+            log_info "恢复配置后重启HAProxy成功"
+        else
+            echo -e "$red HAProxy 服务重启失败，请手动检查! $none"
+            log_error "恢复配置后重启HAProxy失败"
+        fi
     fi
     
     # 重启Xray服务
-    echo -e "$yellow 重启 Xray 服务... $none"
-    if systemctl restart xray; then
-        echo -e "$green Xray 服务重启成功! $none"
-        log_info "恢复配置后重启Xray成功"
-    else
-        echo -e "$red Xray 服务重启失败，请手动检查! $none"
-        log_error "恢复配置后重启Xray失败"
+    if [[ -n "$xray_config_file" && -f "$xray_config_file" ]]; then
+        echo -e "$yellow 重启 Xray 服务... $none"
+        if systemctl restart xray; then
+            echo -e "$green Xray 服务重启成功! $none"
+            log_info "恢复配置后重启Xray成功"
+        else
+            echo -e "$red Xray 服务重启失败，请手动检查! $none"
+            log_error "恢复配置后重启Xray失败"
+        fi
     fi
     
     # 删除临时目录
     rm -rf "$temp_dir"
     
-    echo -e "${green}配置恢复成功${none}"
-    log_info "配置恢复成功"
+    echo -e "${green}配置恢复过程完成${none}"
+    log_info "配置恢复过程完成"
     
     pause
 }
+
 
 # 添加新端口配置
 add_port_configuration() {
@@ -2240,7 +2279,6 @@ modify_port_haproxy() {
             log_info "为端口 $port 启用HAProxy配置"
         fi
     fi
-    
     
 }
 
