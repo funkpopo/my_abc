@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="2.0.8"
+VERSION="2.0.10"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -665,7 +665,7 @@ list_port_configurations() {
             local haproxy_maxconn=$(echo "$port_info" | jq -r '.haproxy.maxconn')
             haproxy_status="${green}启用 (端口:${haproxy_port}, 线程:${haproxy_threads}, 最大连接:${haproxy_maxconn})${none}"
         else
-            haproxy_status="${red}禁用${none}"
+            haproxy_status="${red}禁用,请配置socks${none}"
         fi
         
         echo -e "${green}$index${none}    ${cyan}$port${none}    ${yellow}$uuid_short${none}    ${magenta}$domain${none}    ${socks5_status}    ${haproxy_status}"
@@ -1343,20 +1343,39 @@ generate_connection_info() {
 # 为指定端口配置SOCKS5代理
 configure_socks5_for_port() {
     local port=$1
+    local socks5_address=""
     
-    # SOCKS5 服务器地址
-    read -p "$(echo -e "请输入 SOCKS5 服务器地址: ")" socks5_address
-    if [ -z "$socks5_address" ]; then
-        error
-        return 1
-    fi
+    # 循环直到获取有效的非本地地址
+    while true; do
+        read -p "$(echo -e "请输入 SOCKS5 服务器地址: ")" input_address
+        if [ -z "$input_address" ]; then
+            error
+            continue
+        fi
+        
+        # 检查是否为本地地址
+        if [[ "$input_address" == "127.0.0.1" || "$input_address" == "localhost" ]]; then
+            echo -e "${red}错误: 不能将SOCKS5地址设置为本地地址 ($input_address)${none}"
+            echo -e "${yellow}请配置SOCKS5地址为公网IP或域名${none}"
+            continue
+        fi
+        
+        socks5_address=$input_address
+        break
+    done
     
     # SOCKS5 端口
-    read -p "$(echo -e "请输入 SOCKS5 端口: ")" socks5_port
-    if [ -z "$socks5_port" ] || ! [[ "$socks5_port" =~ ^[0-9]+$ ]] || [[ "$socks5_port" -lt 1 ]] || [[ "$socks5_port" -gt 65535 ]]; then
-        error
-        return 1
-    fi
+    local socks5_port=""
+    while true; do
+        read -p "$(echo -e "请输入 SOCKS5 端口: ")" input_port
+        if [ -z "$input_port" ] || ! [[ "$input_port" =~ ^[0-9]+$ ]] || [[ "$input_port" -lt 1 ]] || [[ "$input_port" -gt 65535 ]]; then
+            error
+            continue
+        fi
+        
+        socks5_port=$input_port
+        break
+    done
     
     # 是否需要认证
     echo -e "是否需要用户名密码认证?"
@@ -1496,8 +1515,7 @@ update_haproxy_config() {
     
     cat > "$HAPROXY_CONFIG" << EOL
 global
-    maxconn 4000
-    nbproc 1          # 只使用单进程
+    maxconn 5000
     nbthread $max_threads        # 使用所有配置中最大的线程数
     tune.bufsize 32768
     tune.maxrewrite 1024
@@ -1972,6 +1990,8 @@ modify_port_shortid() {
     done
 }
 
+
+
 # 修改端口的SOCKS5代理设置
 modify_port_socks5() {
     local port=$1
@@ -2025,9 +2045,32 @@ modify_port_socks5() {
         else
             # 修改SOCKS5设置
             echo
-            echo -e "请输入新的SOCKS5服务器地址 (当前: $cyan$socks5_address$none)"
-            read -p "$(echo -e "(留空保持不变): ")" new_socks5_address
-            [ -z "$new_socks5_address" ] && new_socks5_address=$socks5_address
+            local new_socks5_address=""
+            
+            # 循环直到获取有效的非本地地址
+            while true; do
+                echo -e "请输入新的SOCKS5服务器地址 (当前: $cyan$socks5_address$none)"
+                read -p "$(echo -e "(留空保持不变): ")" input_address
+                
+                if [ -z "$input_address" ]; then
+                    new_socks5_address=$socks5_address
+                    # 如果用户保持当前地址且为本地地址，也给出警告
+                    if [[ "$new_socks5_address" == "127.0.0.1" || "$new_socks5_address" == "localhost" ]]; then
+                        echo -e "${red}错误: 不能使用本地地址 ($new_socks5_address)${none}"
+                        echo -e "${yellow}请配置SOCKS5地址为公网IP或域名${none}"
+                        continue
+                    fi
+                else
+                    # 检查用户是否输入了本地地址
+                    if [[ "$input_address" == "127.0.0.1" || "$input_address" == "localhost" ]]; then
+                        echo -e "${red}错误: 不能将SOCKS5地址设置为本地地址 ($input_address)${none}"
+                        echo -e "${yellow}请配置SOCKS5地址为公网IP或域名${none}"
+                        continue
+                    fi
+                    new_socks5_address=$input_address
+                fi
+                break
+            done
             
             echo -e "请输入新的SOCKS5端口 (当前: $cyan$socks5_port$none)"
             read -p "$(echo -e "(留空保持不变): ")" new_socks5_port
@@ -2057,100 +2100,49 @@ modify_port_socks5() {
             # 保存SOCKS5设置
             set_port_socks5_config "$port" "y" "$new_socks5_address" "$new_socks5_port" "$new_auth_needed" "$new_socks5_user" "$new_socks5_pass" "$new_udp_over_tcp"
             
-            # 更新HAProxy配置
+            # 自动配置HAProxy
+            echo -e "${yellow}正在为SOCKS5代理配置HAProxy...${none}"
+            
+            # 获取当前HAProxy配置
             local haproxy_config=$(echo "$port_info" | jq -r '.haproxy')
-            if [[ "$haproxy_config" != "null" && "$(echo "$haproxy_config" | jq -r '.enabled // false')" == "true" ]]; then
-                echo -e "${yellow}SOCKS5代理配置已更新，正在更新HAProxy配置...${none}"
-                update_haproxy_config
+            local haproxy_enabled=$(echo "$haproxy_config" | jq -r '.enabled // false')
+            local haproxy_port
+            local haproxy_threads
+            local haproxy_maxconn
+            
+            if [[ "$haproxy_enabled" == "true" ]]; then
+                # 使用现有的HAProxy配置
+                haproxy_port=$(echo "$haproxy_config" | jq -r '.port')
+                haproxy_threads=$(echo "$haproxy_config" | jq -r '.threads')
+                haproxy_maxconn=$(echo "$haproxy_config" | jq -r '.maxconn')
+                
+                # 检查端口是否被占用
+                if lsof -i:"$haproxy_port" >/dev/null 2>&1 && ! systemctl is-active --quiet haproxy; then
+                    echo -e "${yellow}端口 $haproxy_port 已被占用，自动选择新端口${none}"
+                    haproxy_port=$((port + 10))
+                    while lsof -i:"$haproxy_port" >/dev/null 2>&1; do
+                        haproxy_port=$((haproxy_port + 1))
+                    done
+                fi
+            else
+                # 创建新的HAProxy配置，默认端口为VLESS端口+10
+                haproxy_port=$((port + 10))
+                while lsof -i:"$haproxy_port" >/dev/null 2>&1; do
+                    echo -e "${yellow}端口 $haproxy_port 已被占用，自动选择下一个端口${none}"
+                    haproxy_port=$((haproxy_port + 1))
+                done
+                haproxy_threads=8
+                haproxy_maxconn=200
             fi
+            
+            # 保存HAProxy配置
+            set_port_haproxy_config "$port" "y" "$haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
+            update_haproxy_config
+            
+            echo -e "${green}HAProxy已配置，端口: $haproxy_port, 线程数: $haproxy_threads, 最大连接数: $haproxy_maxconn${none}"
             
             success "SOCKS5代理设置已更新!"
             log_info "更新端口 $port 的SOCKS5代理设置"
-            
-            # 添加HAProxy配置修改部分
-            echo
-            echo -e "$yellow 修改HAProxy设置 $none"
-            echo "----------------------------------------------------------------"
-            
-            local haproxy_config=$(echo "$port_info" | jq -r '.haproxy')
-            
-            if [[ "$haproxy_config" != "null" && "$(echo "$haproxy_config" | jq -r '.enabled // false')" == "true" ]]; then
-                local haproxy_port=$(echo "$haproxy_config" | jq -r '.port')
-                local haproxy_threads=$(echo "$haproxy_config" | jq -r '.threads')
-                local haproxy_maxconn=$(echo "$haproxy_config" | jq -r '.maxconn')
-                
-                echo -e "当前HAProxy配置:"
-                echo -e "端口: $cyan$haproxy_port$none"
-                echo -e "线程数: $cyan$haproxy_threads$none"
-                echo -e "最大连接数: $cyan$haproxy_maxconn$none"
-                
-                echo
-                echo -e "是否修改HAProxy配置?"
-                read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" modify_haproxy
-                
-                if [[ "$modify_haproxy" == "y" ]]; then
-                    echo -e "请输入新的HAProxy端口 (当前: $cyan$haproxy_port$none)"
-                    read -p "$(echo -e "(留空保持不变): ")" new_haproxy_port
-                    [ -z "$new_haproxy_port" ] && new_haproxy_port=$haproxy_port
-                    
-                    # 检查端口是否被占用（除了当前使用的端口）
-                    if [[ "$new_haproxy_port" != "$haproxy_port" ]] && lsof -i:"$new_haproxy_port" >/dev/null 2>&1; then
-                        echo -e "${yellow}端口 $new_haproxy_port 已被占用，请指定其他端口${none}"
-                        read -p "$(echo -e "请输入 HAProxy 端口: ")" new_haproxy_port
-                        [ -z "$new_haproxy_port" ] && new_haproxy_port=$haproxy_port
-                    fi
-                    
-                    echo -e "请输入新的HAProxy线程数 (当前: $cyan$haproxy_threads$none)"
-                    read -p "$(echo -e "(留空保持不变): ")" new_haproxy_threads
-                    [ -z "$new_haproxy_threads" ] && new_haproxy_threads=$haproxy_threads
-                    
-                    echo -e "请输入新的HAProxy最大连接数 (当前: $cyan$haproxy_maxconn$none)"
-                    read -p "$(echo -e "(留空保持不变): ")" new_haproxy_maxconn
-                    [ -z "$new_haproxy_maxconn" ] && new_haproxy_maxconn=$haproxy_maxconn
-                    
-                    # 更新HAProxy配置
-                    set_port_haproxy_config "$port" "y" "$new_haproxy_port" "$new_haproxy_threads" "$new_haproxy_maxconn"
-                    update_haproxy_config
-                    
-                    success "HAProxy配置已更新!"
-                    log_info "更新端口 $port 的HAProxy配置"
-                fi
-            else
-                # 如果HAProxy未启用，询问是否启用
-                echo -e "HAProxy当前未启用，是否启用?"
-                read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" enable_haproxy
-                
-                if [[ "$enable_haproxy" == "y" ]]; then
-                    # 默认HAProxy端口为VLESS端口+1
-                    local default_haproxy_port=$((port + 1))
-                    
-                    # 检查端口是否被占用
-                    while lsof -i:"$default_haproxy_port" >/dev/null 2>&1; do
-                        echo -e "${yellow}端口 $default_haproxy_port 已被占用，请指定其他端口${none}"
-                        read -p "$(echo -e "请输入 HAProxy 端口: ")" default_haproxy_port
-                        if [ -z "$default_haproxy_port" ] || ! [[ "$default_haproxy_port" =~ ^[0-9]+$ ]] || [[ "$default_haproxy_port" -lt 1 ]] || [[ "$default_haproxy_port" -gt 65535 ]]; then
-                            error
-                            default_haproxy_port=$((port + 1))
-                            continue
-                        fi
-                    done
-                    
-                    # 设置HAProxy线程数
-                    read -p "$(echo -e "请输入 HAProxy 最大线程数 (默认: ${cyan}8${none}): ")" haproxy_threads
-                    [ -z "$haproxy_threads" ] && haproxy_threads=8
-                    
-                    # 设置HAProxy最大连接数
-                    read -p "$(echo -e "请输入 HAProxy 最大连接数 (默认: ${cyan}200${none}): ")" haproxy_maxconn
-                    [ -z "$haproxy_maxconn" ] && haproxy_maxconn=200
-                    
-                    # 保存HAProxy配置
-                    set_port_haproxy_config "$port" "y" "$default_haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
-                    update_haproxy_config
-                    
-                    success "HAProxy配置已启用!"
-                    log_info "为端口 $port 启用HAProxy配置"
-                fi
-            fi
         fi
     else
         echo -e "当前状态: ${red}未启用${none}"
@@ -2159,7 +2151,7 @@ modify_port_socks5() {
         read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" enable_socks5
         
         if [[ "$enable_socks5" == "y" ]]; then
-            # 启用SOCKS5
+            # 调用 configure_socks5_for_port 函数，确保该函数也有检查本地地址的逻辑
             configure_socks5_for_port "$port"
         fi
     fi
@@ -2167,6 +2159,8 @@ modify_port_socks5() {
     # 更新Xray配置
     update_config_file
 }
+
+
 
 # 修改端口的HAProxy设置
 modify_port_haproxy() {
@@ -2185,6 +2179,10 @@ modify_port_haproxy() {
         pause
         return
     fi
+    
+    # 检查SOCKS5地址是否为本地地址
+    local socks5_address=$(echo "$socks5_config" | jq -r '.address')
+    local socks5_port=$(echo "$socks5_config" | jq -r '.port')
     
     if [[ "$haproxy_config" != "null" && "$(echo "$haproxy_config" | jq -r '.enabled // false')" == "true" ]]; then
         local haproxy_port=$(echo "$haproxy_config" | jq -r '.port')
@@ -2244,6 +2242,15 @@ modify_port_haproxy() {
     else
         echo -e "当前状态: ${red}未启用${none}"
         
+        # 检查SOCKS5地址是否为本地地址
+        if [[ "$socks5_address" == "127.0.0.1" || "$socks5_address" == "localhost" ]]; then
+            echo -e "${red}错误: SOCKS5代理使用了本地地址 ($socks5_address)${none}"
+            echo -e "${yellow}本地地址不能用于HAProxy转发，请先修改SOCKS5代理配置为非本地地址${none}"
+            echo -e "${yellow}请返回上级菜单，选择\"修改SOCKS5代理设置\"进行配置${none}"
+            pause
+            return
+        fi
+        
         echo
         echo -e "是否要${green}启用${none} HAProxy?"
         read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" enable_haproxy
@@ -2281,6 +2288,8 @@ modify_port_haproxy() {
     fi
     
 }
+
+
 
 # 删除端口配置
 delete_port_configuration() {
@@ -2711,6 +2720,15 @@ generate_haproxy_config_direct() {
         return 1
     fi
     
+    # 检查HAProxy配置文件是否存在
+    local haproxy_exists=false
+    if [[ -f "$HAPROXY_CONFIG" ]]; then
+        haproxy_exists=true
+        echo -e "${green}检测到HAProxy配置文件${none}"
+    else
+        echo -e "${yellow}未检测到HAProxy配置文件，将创建新配置${none}"
+    fi
+    
     # 确保端口信息文件存在，如果不存在则创建
     if [[ ! -f "$PORT_INFO_FILE" ]]; then
         echo '{"ports":[]}' > "$PORT_INFO_FILE"
@@ -2725,8 +2743,74 @@ generate_haproxy_config_direct() {
     local reset_ports=$(jq '.ports = []' "$PORT_INFO_FILE")
     echo "$reset_ports" > "$PORT_INFO_FILE"
     
-    # 遍历所有inbound
-    jq -c '.inbounds[]' "$CONFIG_FILE" | while read -r inbound; do
+    # 使用临时文件来存储处理结果和状态标记
+    local TEMP_FILE=$(mktemp)
+    local HAS_SOCKS5_FILE=$(mktemp)
+    local NEEDS_HAPROXY_FILE=$(mktemp)
+    
+    # 初始化状态文件
+    echo "false" > "$HAS_SOCKS5_FILE"
+    echo "false" > "$NEEDS_HAPROXY_FILE"
+    
+    # 遍历所有inbound并将结果写入临时文件
+    jq -c '.inbounds[]' "$CONFIG_FILE" > "$TEMP_FILE"
+    
+    # 读取现有HAProxy配置，提取已配置的端口和IP
+    local haproxy_configs=()
+    if $haproxy_exists; then
+        # 从HAProxy配置文件中提取前端和后端配置
+        local current_frontend=""
+        local current_backend=""
+        local vless_port=""
+        local haproxy_port=""
+        local socks5_address=""
+        local socks5_port=""
+        
+        while IFS= read -r line; do
+            # 检测frontend部分
+            if [[ "$line" =~ ^frontend\ socks_front_([0-9]+)$ ]]; then
+                vless_port="${BASH_REMATCH[1]}"
+                current_frontend="frontend"
+                continue
+            fi
+            
+            # 在frontend部分中读取端口
+            if [[ "$current_frontend" == "frontend" && "$line" =~ bind\ \*:([0-9]+) ]]; then
+                haproxy_port="${BASH_REMATCH[1]}"
+                continue
+            fi
+            
+            # 检测backend部分
+            if [[ "$line" =~ ^backend\ socks_servers_([0-9]+)$ ]]; then
+                vless_port="${BASH_REMATCH[1]}"
+                current_frontend=""
+                current_backend="backend"
+                continue
+            fi
+            
+            # 在backend部分中读取SOCKS5地址和端口
+            if [[ "$current_backend" == "backend" && "$line" =~ server\ socks1\ ([^:]+):([0-9]+) ]]; then
+                socks5_address="${BASH_REMATCH[1]}"
+                socks5_port="${BASH_REMATCH[2]}"
+                
+                # 保存配置信息到数组
+                if [[ -n "$vless_port" && -n "$haproxy_port" && -n "$socks5_address" && -n "$socks5_port" ]]; then
+                    haproxy_configs+=("{\"vless_port\":$vless_port,\"haproxy_port\":$haproxy_port,\"socks5_address\":\"$socks5_address\",\"socks5_port\":$socks5_port}")
+                    echo -e "${green}读取到HAProxy配置: VLESS端口=$vless_port, HAProxy端口=$haproxy_port, SOCKS5=$socks5_address:$socks5_port${none}"
+                fi
+                
+                # 重置变量
+                current_backend=""
+                vless_port=""
+                haproxy_port=""
+                socks5_address=""
+                socks5_port=""
+            fi
+        done < "$HAPROXY_CONFIG"
+    fi
+    
+    # 读取临时文件进行处理
+    while read -r inbound; do
         local port=$(echo "$inbound" | jq -r '.port')
         local protocol=$(echo "$inbound" | jq -r '.protocol')
         
@@ -2771,6 +2855,9 @@ generate_haproxy_config_direct() {
                 
                 # 如果有SOCKS5出站，添加SOCKS5信息
                 if [[ -n "$socks5_tag" ]]; then
+                    # 标记存在SOCKS5配置
+                    echo "true" > "$HAS_SOCKS5_FILE"
+                    
                     local socks5_config=$(jq -c --arg tag "$socks5_tag" '.outbounds[] | select(.tag == $tag)' "$CONFIG_FILE")
                     
                     # 获取SOCKS5服务器地址和端口
@@ -2813,35 +2900,84 @@ generate_haproxy_config_direct() {
                         udp_over_tcp="true"
                     fi
                     
-                    # 如果SOCKS5配置无效，提示用户输入
-                    if [[ "$socks5_address" == "1" || "$socks5_address" == "localhost" || "$socks5_port" -eq 1 || -z "$socks5_address" || -z "$socks5_port" ]]; then
-                        echo -e "${yellow}检测到端口 $port 的SOCKS5配置无效 (地址=$socks5_address, 端口=$socks5_port)${none}"
-                        echo -e "请输入正确的SOCKS5服务器地址:"
-                        read -p "$(echo -e "> ")" new_socks5_address
-                        
-                        echo -e "请输入正确的SOCKS5服务器端口:"
-                        read -p "$(echo -e "> ")" new_socks5_port
-                        
-                        if [[ -n "$new_socks5_address" && -n "$new_socks5_port" ]]; then
-                            socks5_address="$new_socks5_address"
-                            socks5_port="$new_socks5_port"
-                        else
-                            echo -e "${yellow}未提供有效信息，使用默认值${none}"
-                            socks5_address="127.0.0.1"
-                            socks5_port="1080"
-                        fi
-                    fi
+                    # 查找对应端口在HAProxy配置中的信息
+                    local existing_haproxy_config=""
+                    local haproxy_socks5_address=""
+                    local haproxy_socks5_port=""
+                    local current_haproxy_port=""
                     
-                    # 为HAProxy配置端口（原来端口+1）
-                    local haproxy_port=$((port + 1))
-                    while lsof -i:"$haproxy_port" >/dev/null 2>&1; do
-                        echo -e "${yellow}端口 $haproxy_port 已被占用，尝试下一个端口${none}"
-                        haproxy_port=$((haproxy_port + 1))
+                    for config in "${haproxy_configs[@]}"; do
+                        local config_vless_port=$(echo "$config" | jq -r '.vless_port')
+                        if [[ "$config_vless_port" == "$port" ]]; then
+                            existing_haproxy_config="$config"
+                            haproxy_socks5_address=$(echo "$config" | jq -r '.socks5_address')
+                            haproxy_socks5_port=$(echo "$config" | jq -r '.socks5_port')
+                            current_haproxy_port=$(echo "$config" | jq -r '.haproxy_port')
+                            break
+                        fi
                     done
                     
-                    # 添加SOCKS5配置和HAProxy配置到端口信息
-                    port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
-                    port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $haproxy_port, \"threads\": 8, \"maxconn\": 200}"
+                    # 检查SOCKS5地址是否为本地地址
+                    if [[ "$socks5_address" == "127.0.0.1" || "$socks5_address" == "localhost" ]]; then
+                        echo -e "${yellow}检测到端口 $port 的SOCKS5地址为本地地址 ($socks5_address)${none}"
+                        
+                        if [[ -n "$existing_haproxy_config" ]]; then
+                            # 已存在HAProxy配置
+                            if [[ "$haproxy_socks5_address" == "127.0.0.1" || "$haproxy_socks5_address" == "localhost" ]]; then
+                                # HAProxy配置也使用了本地地址
+                                echo -e "${red}警告: 端口 $port 的HAProxy配置也使用了本地地址 ($haproxy_socks5_address)${none}"
+                                echo -e "${yellow}本地地址不能用于HAProxy转发，请重新配置SOCKS5代理${none}"
+                                
+                                # 添加SOCKS5配置但不添加HAProxy配置
+                                port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
+                                port_info="$port_info, \"haproxy\": null"
+                            else
+                                # HAProxy配置使用了非本地地址，保留现有HAProxy配置
+                                echo -e "${green}注意: 端口 $port 的SOCKS5使用本地地址，但HAProxy配置使用非本地地址 ($haproxy_socks5_address:$haproxy_socks5_port)${none}"
+                                echo -e "${yellow}保留现有HAProxy配置不变${none}"
+                                
+                                # 添加SOCKS5配置和保留现有HAProxy配置（使用HAProxy中的地址和端口，而不是Xray配置中的地址）
+                                port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$haproxy_socks5_address\", \"port\": $haproxy_socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
+                                port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $current_haproxy_port, \"threads\": 8, \"maxconn\": 200}"
+                                
+                                # 标记需要配置HAProxy
+                                echo "true" > "$NEEDS_HAPROXY_FILE"
+                            fi
+                        else
+                            # 不存在HAProxy配置
+                            echo -e "${yellow}本地地址不能用于HAProxy转发，不会创建HAProxy配置${none}"
+                            
+                            # 添加SOCKS5配置但不添加HAProxy配置
+                            port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
+                            port_info="$port_info, \"haproxy\": null"
+                        fi
+                    else
+                        # SOCKS5配置是非本地地址
+                        # 检查对应端口是否在现有HAProxy配置中
+                        if [[ -n "$existing_haproxy_config" ]]; then
+                            # 使用现有HAProxy配置
+                            echo -e "${green}使用现有HAProxy配置: 端口=$current_haproxy_port, SOCKS5=$haproxy_socks5_address:$haproxy_socks5_port${none}"
+                            
+                            # 添加SOCKS5配置和现有HAProxy配置
+                            port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
+                            port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $current_haproxy_port, \"threads\": 8, \"maxconn\": 200}"
+                        else
+                            # 为HAProxy配置设置新端口（原来端口+1）
+                            local haproxy_port=$((port + 1))
+                            while lsof -i:"$haproxy_port" >/dev/null 2>&1; do
+                                echo -e "${yellow}端口 $haproxy_port 已被占用，尝试下一个端口${none}"
+                                haproxy_port=$((haproxy_port + 1))
+                            done
+                            echo -e "${green}为端口 $port 分配新的HAProxy端口: $haproxy_port${none}"
+                            
+                            # 添加SOCKS5配置和HAProxy配置到端口信息
+                            port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
+                            port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $haproxy_port, \"threads\": 8, \"maxconn\": 200}"
+                        fi
+                        
+                        # 标记需要配置HAProxy
+                        echo "true" > "$NEEDS_HAPROXY_FILE"
+                    fi
                 else
                     # 不存在SOCKS5配置，添加空配置
                     port_info="$port_info, \"socks5\": null, \"haproxy\": null"
@@ -2858,15 +2994,38 @@ generate_haproxy_config_direct() {
                 echo -e "${green}已添加端口 $port 的配置信息${none}"
             fi
         fi
-    done
+    done < "$TEMP_FILE"
+    
+    # 读取状态标记
+    local has_socks5=$(cat "$HAS_SOCKS5_FILE")
+    local needs_haproxy=$(cat "$NEEDS_HAPROXY_FILE")
+    
+    # 清理临时文件
+    rm -f "$TEMP_FILE" "$HAS_SOCKS5_FILE" "$NEEDS_HAPROXY_FILE"
     
     # 使用已有的update_config_file函数来更新Xray配置，确保配置一致性
     echo -e "${yellow}正在使用端口信息更新Xray配置文件...${none}"
     update_config_file
     
-    # 使用已有的update_haproxy_config函数来更新HAProxy配置
-    echo -e "${yellow}正在使用端口信息更新HAProxy配置...${none}"
-    update_haproxy_config
+    # 检查是否需要更新HAProxy配置
+    if [[ "$needs_haproxy" == "true" ]]; then
+        echo -e "${yellow}检测到需要配置HAProxy的端口，正在更新HAProxy配置...${none}"
+        update_haproxy_config
+    else
+        echo -e "${yellow}未检测到需要配置HAProxy的端口，跳过HAProxy配置更新${none}"
+        
+        # 只有当完全没有SOCKS5配置时，才询问是否关闭HAProxy
+        if [[ "$has_socks5" == "false" ]] && [[ -f "$HAPROXY_CONFIG" ]] && systemctl is-active --quiet haproxy; then
+            echo -e "${yellow}未检测到任何SOCKS5配置，是否停止HAProxy服务?${none}"
+            read -p "$(echo -e "(y/n, 默认: ${cyan}n${none}): ")" stop_haproxy
+            
+            if [[ "$stop_haproxy" == "y" ]]; then
+                echo -e "${yellow}正在停止HAProxy服务...${none}"
+                systemctl stop haproxy
+                echo -e "${green}HAProxy服务已停止${none}"
+            fi
+        fi
+    fi
     
     # 重启Xray服务
     echo -e "${yellow}正在重启Xray服务...${none}"
