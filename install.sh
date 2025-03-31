@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="2.0.10"
+VERSION="2.0.11"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -488,7 +488,7 @@ EOL
     }
   },
   "sniffing": {
-    "enabled": true,
+    "enabled": false,
     "destOverride": ["http", "tls", "quic"]
   },
   "tag": "inbound-${port}"
@@ -1085,8 +1085,8 @@ add_port_configuration() {
         done
         
         # 使用默认线程数和最大连接数
-        local haproxy_threads=8
-        local haproxy_maxconn=200
+        local haproxy_threads=12
+        local haproxy_maxconn=400
         
         # 保存HAProxy配置
         set_port_haproxy_config "$port" "y" "$default_haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
@@ -1413,8 +1413,8 @@ configure_socks5_for_port() {
     done
     
     # 使用默认线程数和最大连接数
-    local haproxy_threads=8
-    local haproxy_maxconn=200
+    local haproxy_threads=12
+    local haproxy_maxconn=400
     
     # 保存HAProxy配置
     set_port_haproxy_config "$port" "y" "$default_haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
@@ -2131,8 +2131,8 @@ modify_port_socks5() {
                     echo -e "${yellow}端口 $haproxy_port 已被占用，自动选择下一个端口${none}"
                     haproxy_port=$((haproxy_port + 1))
                 done
-                haproxy_threads=8
-                haproxy_maxconn=200
+                haproxy_threads=12
+                haproxy_maxconn=400
             fi
             
             # 保存HAProxy配置
@@ -2271,12 +2271,12 @@ modify_port_haproxy() {
             done
             
             # 设置HAProxy线程数
-            read -p "$(echo -e "请输入 HAProxy 最大线程数 (默认: ${cyan}8${none}): ")" haproxy_threads
-            [ -z "$haproxy_threads" ] && haproxy_threads=8
+            read -p "$(echo -e "请输入 HAProxy 最大线程数 (默认: ${cyan}12${none}): ")" haproxy_threads
+            [ -z "$haproxy_threads" ] && haproxy_threads=12
             
             # 设置HAProxy最大连接数
-            read -p "$(echo -e "请输入 HAProxy 最大连接数 (默认: ${cyan}200${none}): ")" haproxy_maxconn
-            [ -z "$haproxy_maxconn" ] && haproxy_maxconn=200
+            read -p "$(echo -e "请输入 HAProxy 最大连接数 (默认: ${cyan}400${none}): ")" haproxy_maxconn
+            [ -z "$haproxy_maxconn" ] && haproxy_maxconn=400
             
             # 保存HAProxy配置
             set_port_haproxy_config "$port" "y" "$default_haproxy_port" "$haproxy_threads" "$haproxy_maxconn"
@@ -2938,7 +2938,7 @@ generate_haproxy_config_direct() {
                                 
                                 # 添加SOCKS5配置和保留现有HAProxy配置（使用HAProxy中的地址和端口，而不是Xray配置中的地址）
                                 port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$haproxy_socks5_address\", \"port\": $haproxy_socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
-                                port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $current_haproxy_port, \"threads\": 8, \"maxconn\": 200}"
+                                port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $current_haproxy_port, \"threads\": 12, \"maxconn\": 400}"
                                 
                                 # 标记需要配置HAProxy
                                 echo "true" > "$NEEDS_HAPROXY_FILE"
@@ -2960,7 +2960,7 @@ generate_haproxy_config_direct() {
                             
                             # 添加SOCKS5配置和现有HAProxy配置
                             port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
-                            port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $current_haproxy_port, \"threads\": 8, \"maxconn\": 200}"
+                            port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $current_haproxy_port, \"threads\": 12, \"maxconn\": 400}"
                         else
                             # 为HAProxy配置设置新端口（原来端口+1）
                             local haproxy_port=$((port + 1))
@@ -2972,7 +2972,7 @@ generate_haproxy_config_direct() {
                             
                             # 添加SOCKS5配置和HAProxy配置到端口信息
                             port_info="$port_info, \"socks5\": {\"enabled\": true, \"address\": \"$socks5_address\", \"port\": $socks5_port, \"auth_needed\": $auth_needed, \"username\": \"$socks5_user\", \"password\": \"$socks5_pass\", \"udp_over_tcp\": $udp_over_tcp}"
-                            port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $haproxy_port, \"threads\": 8, \"maxconn\": 200}"
+                            port_info="$port_info, \"haproxy\": {\"enabled\": true, \"port\": $haproxy_port, \"threads\": 12, \"maxconn\": 400}"
                         fi
                         
                         # 标记需要配置HAProxy
