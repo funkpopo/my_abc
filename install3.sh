@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="3.0.0"
+VERSION="3.0.1"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
@@ -551,10 +551,11 @@ EOL
         "method": "${method}"
       }
     ],
-    "network": "tcp,udp"
+    "network": "tcp,udp",
+    "uot": true
   },
   "sniffing": {
-    "enabled": true,
+    "enabled": false,
     "destOverride": ["http", "tls", "quic"]
   },
   "tag": "inbound-${port}"
