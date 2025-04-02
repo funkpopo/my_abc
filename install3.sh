@@ -2115,7 +2115,7 @@ update_haproxy_config() {
     
     # 创建基本配置
     # 找到启用HAProxy的配置中最大的线程数
-    local max_threads=8
+    local max_threads=12
     jq -c '.ports[] | select(.haproxy != null and .haproxy.enabled == true)' "$PORT_INFO_FILE" | while read -r port_info; do
         local threads=$(echo "$port_info" | jq -r '.haproxy.threads')
         if [[ $threads -gt $max_threads ]]; then
@@ -2132,9 +2132,9 @@ global
 
 defaults
     mode tcp
-    timeout connect 2s
-    timeout client 25s
-    timeout server 25s
+    timeout connect 15s
+    timeout client 30s
+    timeout server 30s
     option tcp-smart-accept
     option tcp-smart-connect
     option tcplog
