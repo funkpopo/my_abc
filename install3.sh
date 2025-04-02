@@ -12,7 +12,7 @@ cyan='\e[96m'
 none='\e[0m'
 
 # 脚本版本
-VERSION="3.0.1"
+VERSION="3.0.2"
 
 # 配置文件路径
 CONFIG_FILE="/usr/local/etc/xray/config.json"
