@@ -26,12 +26,8 @@ const apiMapping = {
 const allowedHeaders = [
   // 基本HTTP头
   'accept', 
-  'accept-language',
   'content-type',
-  'content-language',
-  'content-encoding',
   'authorization',
-  'user-agent',
   
   // API密钥头
   'api-key',
